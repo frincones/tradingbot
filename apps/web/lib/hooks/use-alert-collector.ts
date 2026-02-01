@@ -12,11 +12,15 @@ import {
   type HLWSActiveAssetData,
 } from './use-hyperliquid-ws';
 import type {
-  RealtimeBundle,
+  RealtimeBundleV2,
   FlushEvent,
   BurstEvent,
   AbsorptionEvent,
   SentinelResponse,
+  SentinelResponseV2,
+  SentinelAlertV2,
+  TimeframeContext,
+  TimeframeSnapshot,
 } from '@kit/trading-core';
 
 // ============================================================================
@@ -61,6 +65,119 @@ const DEFAULT_WHALE_THRESHOLD = 50000; // $50K
 const MAX_WHALE_TRADES_BUFFER = 100;
 const MAX_EVENTS_BUFFER = 20;
 
+// Timeframe windows in milliseconds
+const TIMEFRAME_10M_MS = 10 * 60 * 1000;
+const TIMEFRAME_1H_MS = 60 * 60 * 1000;
+const TIMEFRAME_4H_MS = 4 * 60 * 60 * 1000;
+
+// Dynamic whale threshold config
+const ATR_LOW_THRESHOLD = 0.5; // 0.5% ATR = quiet market
+const ATR_HIGH_THRESHOLD = 1.5; // 1.5% ATR = volatile market
+const WHALE_THRESHOLD_MULTIPLIER_LOW = 0.6; // $30K in quiet market
+const WHALE_THRESHOLD_MULTIPLIER_HIGH = 2.0; // $100K in volatile market
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
+
+/**
+ * Calculate dynamic whale threshold based on ATR
+ */
+function calculateDynamicWhaleThreshold(
+  atrPercent: number,
+  baseThreshold: number
+): number {
+  if (atrPercent < ATR_LOW_THRESHOLD) {
+    return baseThreshold * WHALE_THRESHOLD_MULTIPLIER_LOW;
+  } else if (atrPercent > ATR_HIGH_THRESHOLD) {
+    return baseThreshold * WHALE_THRESHOLD_MULTIPLIER_HIGH;
+  }
+  return baseThreshold;
+}
+
+/**
+ * Filter trades by timeframe window
+ */
+function filterTradesByTimeframe(
+  trades: { time: number; notionalUsd: number; side: string }[],
+  windowMs: number,
+  now: number
+): { time: number; notionalUsd: number; side: string }[] {
+  const cutoff = now - windowMs;
+  return trades.filter((t) => t.time >= cutoff);
+}
+
+/**
+ * Filter events by timeframe window
+ */
+function filterEventsByTimeframe<T extends { timestamp: number }>(
+  events: T[],
+  windowMs: number,
+  now: number
+): T[] {
+  const cutoff = now - windowMs;
+  return events.filter((e) => e.timestamp >= cutoff);
+}
+
+/**
+ * Calculate timeframe snapshot from trades and events
+ */
+function calculateTimeframeSnapshot(
+  trades: { time: number; notionalUsd: number; side: string }[],
+  flushEvents: FlushEvent[],
+  burstEvents: BurstEvent[],
+  absorptionEvents: AbsorptionEvent[],
+  priceHistory: { time: number; price: number }[],
+  windowMs: number,
+  now: number
+): TimeframeSnapshot {
+  const filteredTrades = filterTradesByTimeframe(trades, windowMs, now);
+  const filteredFlush = filterEventsByTimeframe(flushEvents, windowMs, now);
+  const filteredBurst = filterEventsByTimeframe(burstEvents, windowMs, now);
+  const filteredAbsorption = filterEventsByTimeframe(absorptionEvents, windowMs, now);
+
+  const buying = filteredTrades
+    .filter((t) => t.side === 'B')
+    .reduce((sum, t) => sum + t.notionalUsd, 0);
+  const selling = filteredTrades
+    .filter((t) => t.side !== 'B')
+    .reduce((sum, t) => sum + t.notionalUsd, 0);
+
+  // Calculate price change and ATR from price history
+  const cutoff = now - windowMs;
+  const filteredPrices = priceHistory.filter((p) => p.time >= cutoff);
+  let priceChangePct = 0;
+  let volatilityAtr = 0;
+
+  if (filteredPrices.length >= 2) {
+    const firstPrice = filteredPrices[filteredPrices.length - 1]?.price || 0;
+    const lastPrice = filteredPrices[0]?.price || firstPrice;
+    if (firstPrice > 0) {
+      priceChangePct = ((lastPrice - firstPrice) / firstPrice) * 100;
+    }
+
+    // Simple ATR approximation: average true range as % of price
+    const highs = filteredPrices.map((p) => p.price);
+    const lows = filteredPrices.map((p) => p.price);
+    const high = Math.max(...highs);
+    const low = Math.min(...lows);
+    const avgPrice = (high + low) / 2;
+    if (avgPrice > 0) {
+      volatilityAtr = ((high - low) / avgPrice) * 100;
+    }
+  }
+
+  return {
+    whale_net_flow_usd: buying - selling,
+    flush_count: filteredFlush.length,
+    burst_count: filteredBurst.length,
+    absorption_count: filteredAbsorption.length,
+    price_change_pct: priceChangePct,
+    volume_usd: filteredTrades.reduce((sum, t) => sum + t.notionalUsd, 0),
+    volatility_atr: volatilityAtr,
+  };
+}
+
 // ============================================================================
 // HOOK IMPLEMENTATION
 // ============================================================================
@@ -98,6 +215,9 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
   const isAnalyzingRef = useRef(false);
   // Forward-declared ref for triggerAnalysis (set later when function is defined)
   const triggerAnalysisRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  // Price history for ATR calculation (max 4 hours of data)
+  const priceHistory = useRef<{ time: number; price: number }[]>([]);
+  const MAX_PRICE_HISTORY = 1000; // ~4 hours at 15s intervals
 
   // ============================================================================
   // WEBSOCKET HANDLERS
@@ -172,6 +292,15 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
           funding: data.funding,
         });
         marketData.current = data;
+
+        // Record price for ATR calculation
+        const price = parseFloat(data.markPx || '0');
+        if (price > 0) {
+          priceHistory.current = [
+            { time: Date.now(), price },
+            ...priceHistory.current.slice(0, MAX_PRICE_HISTORY - 1),
+          ];
+        }
       }
     },
     [symbol]
@@ -227,10 +356,10 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
   }, [isConnected, enabled, symbol, subscribeTrades, subscribeActiveAssetData, unsubscribeTrades, unsubscribeActiveAssetData]);
 
   // ============================================================================
-  // BUILD REALTIME BUNDLE
+  // BUILD REALTIME BUNDLE (V2 with multi-timeframe)
   // ============================================================================
 
-  const buildBundle = useCallback(async (): Promise<RealtimeBundle | null> => {
+  const buildBundle = useCallback(async (): Promise<RealtimeBundleV2 | null> => {
     // Try to use cached market data first, fallback to REST API
     let md = marketData.current;
 
@@ -261,9 +390,65 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
       return null;
     }
 
+    const now = Date.now();
     const trades = whaleTrades.current;
 
-    // Calculate whale flow
+    // Convert whale trades for timeframe calculation
+    const tradesForTimeframe = trades.map((t) => ({
+      time: t.time,
+      notionalUsd: t.notionalUsd,
+      side: t.side,
+    }));
+
+    // Calculate timeframe snapshots
+    const tf_10m = calculateTimeframeSnapshot(
+      tradesForTimeframe,
+      flushEvents.current,
+      burstEvents.current,
+      absorptionEvents.current,
+      priceHistory.current,
+      TIMEFRAME_10M_MS,
+      now
+    );
+
+    const tf_1h = calculateTimeframeSnapshot(
+      tradesForTimeframe,
+      flushEvents.current,
+      burstEvents.current,
+      absorptionEvents.current,
+      priceHistory.current,
+      TIMEFRAME_1H_MS,
+      now
+    );
+
+    const tf_4h = calculateTimeframeSnapshot(
+      tradesForTimeframe,
+      flushEvents.current,
+      burstEvents.current,
+      absorptionEvents.current,
+      priceHistory.current,
+      TIMEFRAME_4H_MS,
+      now
+    );
+
+    const timeframeContext: TimeframeContext = { tf_10m, tf_1h, tf_4h };
+
+    // Use 1h ATR for dynamic threshold calculation
+    const atrPercent = tf_1h.volatility_atr;
+    const dynamicWhaleThreshold = calculateDynamicWhaleThreshold(
+      atrPercent,
+      whaleThresholdUsd
+    );
+
+    console.log('[Sentinel] 📊 Timeframe context:', {
+      '10m_flow': tf_10m.whale_net_flow_usd.toFixed(0),
+      '1h_flow': tf_1h.whale_net_flow_usd.toFixed(0),
+      '4h_flow': tf_4h.whale_net_flow_usd.toFixed(0),
+      atr_1h: atrPercent.toFixed(2) + '%',
+      dynamic_threshold: dynamicWhaleThreshold.toFixed(0),
+    });
+
+    // Calculate whale flow (using all trades for backward compat)
     const buyingTotal = trades
       .filter((t) => t.side === 'B')
       .reduce((sum, t) => sum + t.notionalUsd, 0);
@@ -299,7 +484,16 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
     const markPrice = parseFloat(md.markPx || '0');
     const oraclePrice = parseFloat(md.oraclePx || md.markPx || '0');
 
+    // Use dynamic threshold for dominant direction
+    const effectiveThreshold = dynamicWhaleThreshold;
+
     return {
+      // V2 specific fields
+      timeframe_context: timeframeContext,
+      dynamic_whale_threshold: dynamicWhaleThreshold,
+      atr_percent: atrPercent,
+
+      // Standard bundle fields
       market_state: {
         symbol,
         current_price: markPrice,
@@ -311,7 +505,7 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
         bid_price: markPrice * 0.9999,
         ask_price: markPrice * 1.0001,
         spread_bps: 2,
-        timestamp: Date.now(),
+        timestamp: now,
       },
       features: {
         flush_events: flushEvents.current,
@@ -340,9 +534,9 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
         total_whale_selling_usd: sellingTotal,
         net_whale_flow_usd: netFlow,
         dominant_direction:
-          netFlow > whaleThresholdUsd
+          netFlow > effectiveThreshold
             ? 'buying'
-            : netFlow < -whaleThresholdUsd
+            : netFlow < -effectiveThreshold
               ? 'selling'
               : 'neutral',
       },
@@ -410,13 +604,13 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
     onAnalysisStart?.();
 
     try {
-      console.log('[Sentinel] 🤖 Calling AI agent API...');
+      console.log('[Sentinel] 🤖 Calling AI agent API (V2 dual analysis)...');
       const response = await fetch('/api/trading/agents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include', // Important: include cookies for authentication
         body: JSON.stringify({
-          action: 'sentinel',
+          action: 'sentinel-v2', // Use V2 with dual alert system
           data: { bundle },
         }),
       });
@@ -428,13 +622,18 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
       }
 
       const result = await response.json();
-      console.log('[Sentinel] ✅ Response:', {
-        decision: result.response?.decision,
-        confidence: result.response?.confidence,
-        recommendation: result.response?.recommendation,
-        pattern: result.response?.pattern?.type,
+      // Handle V2 response with dual confidence scores
+      const v2Response = result.response as SentinelResponseV2;
+      console.log('[Sentinel] ✅ V2 Response:', {
+        decision: v2Response?.decision,
+        riskConfidence: v2Response?.risk_confidence,
+        setupConfidence: v2Response?.setup_confidence,
+        alertsCount: v2Response?.alerts?.length ?? 0,
+        alertTypes: v2Response?.alerts?.map((a: SentinelAlertV2) => a.type) ?? [],
+        recommendation: v2Response?.recommendation,
       });
-      const sentinelResponse = result.response as SentinelResponse;
+      // For backward compatibility, use the V2 response as SentinelResponse
+      const sentinelResponse = v2Response as SentinelResponse;
 
       setState((s) => ({
         ...s,
@@ -452,15 +651,31 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
       onAnalysisComplete?.(sentinelResponse);
 
       if (sentinelResponse.decision === 'ALERT') {
-        console.log('[Sentinel] 🚨 ALERT generated!', {
-          pattern: sentinelResponse.pattern?.type,
-          setup: sentinelResponse.pattern?.setup,
-          confidence: sentinelResponse.confidence,
-          recommendation: sentinelResponse.recommendation,
-        });
+        // Log each alert type from V2 response
+        const alerts = v2Response.alerts || [];
+        for (const alert of alerts) {
+          if (alert.type === 'RISK_ALERT') {
+            console.log('[Sentinel] ⚠️ RISK_ALERT generated!', {
+              riskType: alert.risk_type,
+              riskLevel: alert.risk_level,
+              confidence: alert.confidence,
+              timeframe: alert.timeframe,
+            });
+          } else {
+            console.log('[Sentinel] 🚨 TRADE_ALERT generated!', {
+              pattern: alert.pattern?.type,
+              setup: alert.pattern?.setup,
+              confidence: alert.confidence,
+              timeframe: alert.timeframe,
+            });
+          }
+        }
         onNewAlert?.(sentinelResponse);
       } else {
-        console.log('[Sentinel] 📊 No alert - decision:', sentinelResponse.decision);
+        console.log('[Sentinel] 📊 No alert - decision:', sentinelResponse.decision, {
+          riskConfidence: v2Response.risk_confidence,
+          setupConfidence: v2Response.setup_confidence,
+        });
       }
     } catch (error) {
       const errorMessage =

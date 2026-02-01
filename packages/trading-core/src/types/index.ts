@@ -30,3 +30,9 @@ export * from './market';
 // Alert types
 export * from './alert';
 
+// Atlas types
+export * from './atlas';
+
+// KPI types
+export * from './kpis';
+

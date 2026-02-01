@@ -335,6 +335,118 @@ export interface SentinelResponse {
 }
 
 // ============================================================================
+// SENTINEL V2 TYPES - DUAL ALERT SYSTEM
+// ============================================================================
+
+/** Alert type: RISK for market warnings, TRADE for entry signals */
+export type AlertType = 'RISK_ALERT' | 'TRADE_ALERT';
+
+/** Risk alert subtypes */
+export type RiskAlertType =
+  | 'WHALE_SELLING_PRESSURE'    // Large whale selling detected
+  | 'WHALE_BUYING_PRESSURE'     // Large whale buying detected
+  | 'VOLATILITY_SPIKE'          // ATR above threshold
+  | 'LIQUIDATION_CASCADE_RISK'  // Risk of cascade liquidations
+  | 'MARKET_STRESS'             // Multiple stress indicators
+  | 'MOMENTUM_EXHAUSTION';      // Momentum fading
+
+/** Risk severity levels */
+export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
+
+/** Timeframe for analysis context */
+export type AlertTimeframe = '10m' | '1h' | '4h';
+
+/** Snapshot of data for a specific timeframe */
+export interface TimeframeSnapshot {
+  whale_net_flow_usd: number;
+  flush_count: number;
+  burst_count: number;
+  absorption_count: number;
+  price_change_pct: number;
+  volume_usd: number;
+  volatility_atr: number;
+}
+
+/** Multi-timeframe context for analysis */
+export interface TimeframeContext {
+  tf_10m: TimeframeSnapshot;
+  tf_1h: TimeframeSnapshot;
+  tf_4h: TimeframeSnapshot;
+}
+
+/** Individual alert in the dual alert system */
+export interface SentinelAlertV2 {
+  type: AlertType;
+
+  // RISK_ALERT specific fields
+  risk_type?: RiskAlertType;
+  risk_level?: RiskLevel;
+  risk_description?: string;
+
+  // TRADE_ALERT specific fields
+  pattern?: AlertPattern;
+  thesis?: AlertThesis;
+  execution_candidate?: AlertExecutionCandidate;
+
+  // Common fields
+  confidence: number;
+  timeframe: AlertTimeframe;
+  expires_at: number; // timestamp ms
+}
+
+/** Sentinel v2 response with dual alert capability */
+export interface SentinelResponseV2 extends SentinelResponse {
+  /** Array of alerts (0, 1, or 2 alerts possible) */
+  alerts: SentinelAlertV2[];
+
+  /** Risk confidence score (0.0-1.0) for RISK_ALERT generation */
+  risk_confidence: number;
+
+  /** Setup confidence score (0.0-1.0) for TRADE_ALERT generation */
+  setup_confidence: number;
+
+  /** Multi-timeframe analysis context */
+  timeframe_context?: TimeframeContext;
+
+  /** If this response updates an existing alert */
+  updates_alert_id?: string;
+}
+
+/** Extended bundle for v2 with multi-timeframe data */
+export interface RealtimeBundleV2 extends RealtimeBundle {
+  /** Multi-timeframe context */
+  timeframe_context: TimeframeContext;
+
+  /** Dynamic whale threshold based on ATR */
+  dynamic_whale_threshold: number;
+
+  /** Current ATR percentage */
+  atr_percent: number;
+}
+
+/** Extended agent alert for v2 */
+export interface AgentAlertV2 extends AgentAlert {
+  /** Alert type: RISK or TRADE */
+  alert_type: AlertType;
+
+  /** Risk type (only for RISK_ALERT) */
+  risk_type?: RiskAlertType | null;
+
+  /** Risk level (only for RISK_ALERT) */
+  risk_level?: RiskLevel | null;
+
+  /** Timeframe of the alert */
+  timeframe: AlertTimeframe;
+
+  /** If this alert updates another */
+  updates_alert_id?: string | null;
+
+  /** Dual confidence scores */
+  risk_confidence?: number | null;
+  setup_confidence?: number | null;
+}
+
+// ============================================================================
 // API RESPONSE TYPES
 // ============================================================================
 

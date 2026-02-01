@@ -12,26 +12,33 @@ import type {
 import type { AgentConfig, AgentContext, AgentTrace } from './types';
 import type {
   RealtimeBundle,
+  RealtimeBundleV2,
   SentinelRequest,
   SentinelResponse,
+  SentinelResponseV2,
+  SentinelAlertV2,
   AlertPattern,
   AlertThesis,
   AlertExecutionCandidate,
   AlertRecommendation,
   AlertDecision,
+  AlertType,
+  RiskAlertType,
+  RiskLevel,
+  TimeframeContext,
 } from '@kit/trading-core';
 
 // ============================================================================
 // CONSTANTS
 // ============================================================================
 
-const DEFAULT_MODEL = 'gpt-4o';
+const DEFAULT_MODEL = 'gpt-4o-mini';
 const DEFAULT_MAX_TOKENS = 3000;
 const SENTINEL_TEMPERATURE = 0.3; // Low temperature for consistent analysis
 
-// Cost per 1K tokens (GPT-4o approximate)
-const COST_PER_1K_INPUT = 0.005;
-const COST_PER_1K_OUTPUT = 0.015;
+// Cost per 1K tokens (GPT-4o-mini approximate)
+const COST_PER_1K_INPUT = 0.00015;
+const COST_PER_1K_OUTPUT = 0.0006;
 
 // ============================================================================
 // TOOL DEFINITIONS
@@ -111,9 +118,10 @@ const SENTINEL_TOOLS: ChatCompletionTool[] = [
 ];
 
 // ============================================================================
-// SYSTEM PROMPT
+// SYSTEM PROMPTS
 // ============================================================================
 
+// V1 prompt (kept for backward compatibility)
 const SENTINEL_SYSTEM_PROMPT = `Eres "LiquidationPattern Sentinel" — Agente AI de trading ops, especializado en:
 - Detectar patrones tipo "cazar liquidaciones" basados en flush/burst + confirmaciones (reclaim/absorción) + eventos whales.
 - Generar ALERTAS accionables con una TESIS de ejecución completa para órdenes.
@@ -229,6 +237,144 @@ No es asesoría financiera. El objetivo es analítica y automatización segura.
     "risk_utilization": number
   }
 }`;
+
+// V2 prompt with dual analysis (RISK_ALERT + TRADE_ALERT)
+const SENTINEL_V2_SYSTEM_PROMPT = `Eres "LiquidationPattern Sentinel v2" — Agente AI de trading ops con ANÁLISIS DUAL.
+
+## CAPACIDADES
+1. **RISK_ALERT**: Detectar condiciones de riesgo de mercado (presión whale, volatilidad, stress)
+2. **TRADE_ALERT**: Detectar setups de trading con alta probabilidad (flush+burst+confirmaciones)
+
+## ANÁLISIS DUAL (OBLIGATORIO)
+Debes realizar DOS análisis INDEPENDIENTES en cada ciclo:
+
+### 1. RISK ANALYSIS → risk_confidence (0.0-1.0)
+Evalúa condiciones de riesgo:
+- WHALE_SELLING_PRESSURE: Net flow whale < -$50K en 10m
+- WHALE_BUYING_PRESSURE: Net flow whale > +$50K en 10m
+- VOLATILITY_SPIKE: ATR > 1.5% (mercado muy volátil)
+- MARKET_STRESS: Múltiples indicadores de tensión
+- MOMENTUM_EXHAUSTION: Momentum agotándose
+
+**Genera RISK_ALERT si risk_confidence >= 0.70**
+
+### 2. TRADE SETUP ANALYSIS → setup_confidence (0.0-1.0)
+Evalúa setups de trading:
+- FLUSH_RECLAIM: Flush down + reclaim del nivel
+- BURST_CONTINUATION: Burst up + continuación del momentum
+- ABSORPTION_REVERSAL: Absorción de órdenes + reversión
+- WHALE_DRIVEN: Flujo whale > $100K en una dirección
+- LIQUIDATION_CASCADE: Cascada de liquidaciones
+
+**Genera TRADE_ALERT si setup_confidence >= 0.80 Y confirmations >= 2**
+
+## CONFIRMACIONES REQUERIDAS (mínimo 2 para TRADE_ALERT)
+- reclaim_confirmed: Precio recuperó nivel clave
+- absorption_confirmed: Órdenes grandes absorbidas
+- whale_confirmed: Whale flow alineado con setup
+- volume_confirmed: Volumen above average
+- momentum_confirmed: Momentum en dirección del setup
+
+## CONTEXTO MULTI-TIMEFRAME
+Analiza coherencia entre timeframes (10m, 1h, 4h):
+- Un TRADE_ALERT debe tener coherencia entre timeframes
+- Un RISK_ALERT puede generarse en cualquier timeframe individual
+- Usa el ATR de 1h para contexto de volatilidad
+
+## REGLAS DE NEGOCIO
+- Si kill_switch_active => BLOCK todo
+- Si cooldown_active => WAIT para TRADE_ALERT (RISK_ALERT puede seguir)
+- Si daily_loss > 50% max => WAIT para TRADE_ALERT
+- NO inventar datos. Si falta evidencia, reducir confianza
+- Usar threshold dinámico proporcionado en bundle
+
+## OUTPUT JSON ESTRICTO
+{
+  "decision": "ALERT|NO_ALERT|NEED_MORE_DATA",
+
+  "risk_confidence": 0.0-1.0,
+  "setup_confidence": 0.0-1.0,
+
+  "alerts": [
+    {
+      "type": "RISK_ALERT|TRADE_ALERT",
+      "risk_type": "WHALE_SELLING_PRESSURE|WHALE_BUYING_PRESSURE|VOLATILITY_SPIKE|MARKET_STRESS|MOMENTUM_EXHAUSTION",
+      "risk_level": "low|medium|high|critical",
+      "risk_description": "string breve explicando el riesgo",
+      "confidence": 0.0-1.0,
+      "timeframe": "10m|1h|4h"
+    }
+  ],
+
+  "pattern": { /* solo si hay TRADE_ALERT */ },
+  "thesis": { /* solo si hay TRADE_ALERT */ },
+  "execution_candidate": { /* solo si hay TRADE_ALERT */ },
+
+  "confidence": 0.0-1.0,
+  "recommendation": "APPROVE|WAIT|BLOCK",
+  "risk_notes": ["nota 1", "nota 2"],
+  "telemetry": {
+    "market_price": number,
+    "spread_bps": number,
+    "whale_net_flow": number,
+    "risk_utilization": number
+  }
+}
+
+## EJEMPLOS
+
+### Ejemplo 1: Solo RISK_ALERT
+Input: $2M whale selling, $400K buying, sin patrón claro
+Output:
+{
+  "decision": "ALERT",
+  "risk_confidence": 0.85,
+  "setup_confidence": 0.45,
+  "alerts": [{
+    "type": "RISK_ALERT",
+    "risk_type": "WHALE_SELLING_PRESSURE",
+    "risk_level": "high",
+    "risk_description": "Presión vendedora masiva: $2M sells vs $400K buys",
+    "confidence": 0.85,
+    "timeframe": "10m"
+  }],
+  "recommendation": "WAIT"
+}
+
+### Ejemplo 2: TRADE_ALERT con confirmaciones
+Input: Flush down fuerte + reclaim + whale buying
+Output:
+{
+  "decision": "ALERT",
+  "risk_confidence": 0.30,
+  "setup_confidence": 0.85,
+  "alerts": [{
+    "type": "TRADE_ALERT",
+    "pattern": {...},
+    "thesis": {...},
+    "execution_candidate": {...},
+    "confidence": 0.85,
+    "timeframe": "10m"
+  }],
+  "pattern": {...},
+  "thesis": {...},
+  "execution_candidate": {...},
+  "recommendation": "APPROVE"
+}
+
+### Ejemplo 3: Ambas alertas
+Input: Mucha volatilidad + flush reclaim claro
+Output:
+{
+  "decision": "ALERT",
+  "alerts": [
+    {"type": "RISK_ALERT", "risk_type": "VOLATILITY_SPIKE", ...},
+    {"type": "TRADE_ALERT", "pattern": {...}, ...}
+  ],
+  "risk_notes": ["CUIDADO: Setup válido pero alta volatilidad"]
+}
+
+Idioma: Español (Colombia). Estilo: técnico, claro, sin humo.`;
 
 // ============================================================================
 // TOOL HANDLER TYPE
@@ -386,7 +532,7 @@ export class SentinelAgent {
   }
 
   /**
-   * Build user prompt with market data bundle
+   * Build user prompt with market data bundle (V1)
    */
   private buildUserPrompt(bundle: RealtimeBundle): string {
     return `Analiza este bundle de datos de mercado en tiempo real y determina si hay un setup de trading de alta probabilidad:
@@ -436,6 +582,88 @@ ${bundle.features.absorption_events.map((e) => `- ${e.direction.toUpperCase()} a
 - Paper mode: ${bundle.config.paper_mode ? 'Sí' : 'No'}
 
 Analiza y responde con tu evaluación en formato JSON.`;
+  }
+
+  /**
+   * Build user prompt with V2 bundle (multi-timeframe)
+   */
+  private buildUserPromptV2(bundle: RealtimeBundleV2): string {
+    const tf = bundle.timeframe_context;
+
+    return `Analiza este bundle V2 con contexto MULTI-TIMEFRAME y genera alertas duales (RISK + TRADE):
+
+## Estado del Mercado
+- Symbol: ${bundle.market_state.symbol}
+- Precio actual: $${bundle.market_state.current_price.toLocaleString()}
+- Mark: $${bundle.market_state.mark_price.toLocaleString()}
+- Funding: ${(bundle.market_state.funding_rate * 100).toFixed(4)}%
+- Open Interest: $${bundle.market_state.open_interest.toLocaleString()}
+- Volumen 24h: $${bundle.market_state.volume_24h.toLocaleString()}
+
+## CONTEXTO MULTI-TIMEFRAME (CRÍTICO)
+### Timeframe 10 minutos:
+- Whale net flow: $${tf.tf_10m.whale_net_flow_usd.toLocaleString()}
+- Flush events: ${tf.tf_10m.flush_count}
+- Burst events: ${tf.tf_10m.burst_count}
+- Absorption events: ${tf.tf_10m.absorption_count}
+- Price change: ${tf.tf_10m.price_change_pct.toFixed(2)}%
+- Volume: $${tf.tf_10m.volume_usd.toLocaleString()}
+- ATR: ${tf.tf_10m.volatility_atr.toFixed(2)}%
+
+### Timeframe 1 hora:
+- Whale net flow: $${tf.tf_1h.whale_net_flow_usd.toLocaleString()}
+- Flush events: ${tf.tf_1h.flush_count}
+- Burst events: ${tf.tf_1h.burst_count}
+- Price change: ${tf.tf_1h.price_change_pct.toFixed(2)}%
+- Volume: $${tf.tf_1h.volume_usd.toLocaleString()}
+- ATR: ${tf.tf_1h.volatility_atr.toFixed(2)}%
+
+### Timeframe 4 horas:
+- Whale net flow: $${tf.tf_4h.whale_net_flow_usd.toLocaleString()}
+- Flush events: ${tf.tf_4h.flush_count}
+- Burst events: ${tf.tf_4h.burst_count}
+- Price change: ${tf.tf_4h.price_change_pct.toFixed(2)}%
+- Volume: $${tf.tf_4h.volume_usd.toLocaleString()}
+- ATR: ${tf.tf_4h.volatility_atr.toFixed(2)}%
+
+## Threshold Dinámico
+- Whale threshold actual: $${bundle.dynamic_whale_threshold.toLocaleString()}
+- ATR base: ${bundle.atr_percent.toFixed(2)}%
+
+## Eventos Detectados (últimos 10m)
+### Flush Events (${bundle.features.flush_events.length}):
+${bundle.features.flush_events.slice(0, 5).map((e) => `- ${e.direction.toUpperCase()} flush @ $${e.price_level} | conf: ${(e.confidence * 100).toFixed(0)}% | reclaim: ${e.reclaim_detected}`).join('\n') || 'Ninguno'}
+
+### Burst Events (${bundle.features.burst_events.length}):
+${bundle.features.burst_events.slice(0, 5).map((e) => `- ${e.direction.toUpperCase()} burst | momentum: ${e.momentum.toFixed(2)} | conf: ${(e.confidence * 100).toFixed(0)}%`).join('\n') || 'Ninguno'}
+
+### Absorption Events (${bundle.features.absorption_events.length}):
+${bundle.features.absorption_events.slice(0, 5).map((e) => `- ${e.direction.toUpperCase()} absorption @ $${e.price_level} | ratio: ${e.absorption_ratio.toFixed(2)} | conf: ${(e.confidence * 100).toFixed(0)}%`).join('\n') || 'Ninguno'}
+
+## Actividad Whale (agregada)
+- Whale buying total: $${bundle.whales.total_whale_buying_usd.toLocaleString()}
+- Whale selling total: $${bundle.whales.total_whale_selling_usd.toLocaleString()}
+- Net flow: $${bundle.whales.net_whale_flow_usd.toLocaleString()} (${bundle.whales.dominant_direction})
+- Trades recientes: ${bundle.whales.recent_trades.length}
+
+## Estado de Riesgo
+- Daily loss: $${bundle.risk_state.daily_loss_usd.toFixed(2)} / $${bundle.risk_state.max_daily_loss_usd}
+- Trades hoy: ${bundle.risk_state.daily_trades_count} / ${bundle.risk_state.max_trades_per_day}
+- Cooldown: ${bundle.risk_state.cooldown_active ? 'ACTIVO' : 'No'}
+- Kill switch: ${bundle.risk_state.kill_switch_active ? 'ACTIVO - ' + bundle.risk_state.kill_switch_reason : 'No'}
+
+## Configuración
+- Flush threshold: ${bundle.config.flush_threshold}
+- Burst threshold: ${bundle.config.burst_threshold}
+- Max position: $${bundle.config.max_position_usd}
+- Paper mode: ${bundle.config.paper_mode ? 'Sí' : 'No'}
+
+INSTRUCCIONES:
+1. Evalúa RISK_ALERT: ¿Hay condiciones de riesgo de mercado? (risk_confidence >= 0.70)
+2. Evalúa TRADE_ALERT: ¿Hay setup de trading viable? (setup_confidence >= 0.80 + min 2 confirmaciones)
+3. Genera el JSON con ambos scores y las alertas correspondientes
+
+Responde en formato JSON estricto.`;
   }
 
   /**
@@ -509,10 +737,241 @@ Analiza y responde con tu evaluación en formato JSON.`;
   }
 
   /**
+   * Summarize V2 bundle for trace logging
+   */
+  private summarizeBundleV2(bundle: RealtimeBundleV2): Record<string, unknown> {
+    return {
+      symbol: bundle.market_state.symbol,
+      price: bundle.market_state.current_price,
+      timeframe_context: {
+        tf_10m_flow: bundle.timeframe_context.tf_10m.whale_net_flow_usd,
+        tf_1h_flow: bundle.timeframe_context.tf_1h.whale_net_flow_usd,
+        tf_4h_flow: bundle.timeframe_context.tf_4h.whale_net_flow_usd,
+      },
+      dynamic_threshold: bundle.dynamic_whale_threshold,
+      atr_percent: bundle.atr_percent,
+      flush_count: bundle.features.flush_events.length,
+      burst_count: bundle.features.burst_events.length,
+      whale_net_flow: bundle.whales.net_whale_flow_usd,
+      risk_state: {
+        daily_loss: bundle.risk_state.daily_loss_usd,
+        cooldown: bundle.risk_state.cooldown_active,
+        kill_switch: bundle.risk_state.kill_switch_active,
+      },
+    };
+  }
+
+  /**
    * Calculate cost in USD
    */
   private calculateCost(input: number, output: number): number {
     return (input * COST_PER_1K_INPUT + output * COST_PER_1K_OUTPUT) / 1000;
+  }
+
+  /**
+   * V2 Analysis with dual alert system (RISK_ALERT + TRADE_ALERT)
+   */
+  async analyzeV2(
+    request: SentinelRequest & { bundle: RealtimeBundleV2 },
+    context: AgentContext
+  ): Promise<{ response: SentinelResponseV2; trace: AgentTrace }> {
+    const startTime = Date.now();
+    const { bundle } = request;
+
+    // Build V2 user prompt with multi-timeframe context
+    const userPrompt = this.buildUserPromptV2(bundle);
+
+    const messages: ChatCompletionMessageParam[] = [
+      { role: 'system', content: SENTINEL_V2_SYSTEM_PROMPT },
+      { role: 'user', content: userPrompt },
+    ];
+
+    // Initial completion with tools available
+    let completion = await this.openai.chat.completions.create({
+      model: this.model,
+      messages,
+      tools: SENTINEL_TOOLS,
+      tool_choice: 'auto',
+      max_tokens: this.maxTokens,
+      temperature: SENTINEL_TEMPERATURE,
+    });
+
+    // Handle tool calls iteratively (max 5 rounds)
+    let toolCallsProcessed = 0;
+    const maxToolCalls = 5;
+
+    while (
+      completion.choices[0]?.message?.tool_calls &&
+      toolCallsProcessed < maxToolCalls
+    ) {
+      const toolCalls = completion.choices[0].message.tool_calls;
+      messages.push(completion.choices[0].message);
+
+      for (const toolCall of toolCalls) {
+        const toolName = toolCall.function.name;
+        const toolArgs = JSON.parse(toolCall.function.arguments);
+
+        let toolResult: unknown;
+        if (this.toolHandlers.has(toolName)) {
+          try {
+            toolResult = await this.toolHandlers.get(toolName)!(toolArgs);
+          } catch (error) {
+            toolResult = {
+              error: `Tool execution failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+            };
+          }
+        } else {
+          toolResult = { error: `Unknown tool: ${toolName}` };
+        }
+
+        messages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(toolResult),
+        });
+      }
+
+      toolCallsProcessed++;
+
+      completion = await this.openai.chat.completions.create({
+        model: this.model,
+        messages,
+        tools: SENTINEL_TOOLS,
+        tool_choice: 'auto',
+        max_tokens: this.maxTokens,
+        temperature: SENTINEL_TEMPERATURE,
+        response_format: { type: 'json_object' },
+      });
+    }
+
+    // Final completion for JSON response
+    if (!completion.choices[0]?.message?.content) {
+      messages.push(completion.choices[0]?.message || { role: 'assistant', content: '' });
+      messages.push({
+        role: 'user',
+        content: 'Based on the data gathered, provide your final dual analysis (RISK + TRADE) as JSON.',
+      });
+
+      completion = await this.openai.chat.completions.create({
+        model: this.model,
+        messages,
+        max_tokens: this.maxTokens,
+        temperature: SENTINEL_TEMPERATURE,
+        response_format: { type: 'json_object' },
+      });
+    }
+
+    // Parse response
+    const latencyMs = Date.now() - startTime;
+    const tokensInput = completion.usage?.prompt_tokens || 0;
+    const tokensOutput = completion.usage?.completion_tokens || 0;
+
+    const messageContent = completion.choices[0]?.message?.content || '{}';
+    let rawResponse: Record<string, unknown>;
+
+    try {
+      rawResponse = JSON.parse(messageContent);
+    } catch {
+      rawResponse = {
+        decision: 'NEED_MORE_DATA',
+        risk_confidence: 0,
+        setup_confidence: 0,
+        alerts: [],
+        risk_notes: ['Failed to parse agent response'],
+      };
+    }
+
+    // Build V2 response
+    const response = this.buildResponseV2(rawResponse, bundle);
+
+    // Build trace
+    const trace: AgentTrace = {
+      agentName: 'sentinel-v2',
+      input: { bundle_summary: this.summarizeBundleV2(bundle), strategy_id: request.strategy_id },
+      output: response,
+      tokensInput,
+      tokensOutput,
+      latencyMs,
+      model: this.model,
+      costUsd: this.calculateCost(tokensInput, tokensOutput),
+    };
+
+    return { response, trace };
+  }
+
+  /**
+   * Build V2 response with dual alert system
+   */
+  private buildResponseV2(
+    raw: Record<string, unknown>,
+    bundle: RealtimeBundleV2
+  ): SentinelResponseV2 {
+    const decision = (raw.decision as AlertDecision) || 'NO_ALERT';
+    const riskConfidence = typeof raw.risk_confidence === 'number' ? raw.risk_confidence : 0;
+    const setupConfidence = typeof raw.setup_confidence === 'number' ? raw.setup_confidence : 0;
+    // Use setup_confidence for backward-compat confidence field
+    const confidence = setupConfidence || (typeof raw.confidence === 'number' ? raw.confidence : 0);
+    const recommendation = (raw.recommendation as AlertRecommendation) || 'WAIT';
+
+    // Parse alerts array
+    let alerts: SentinelAlertV2[] = [];
+    if (Array.isArray(raw.alerts)) {
+      alerts = (raw.alerts as Record<string, unknown>[]).map((a) => ({
+        type: (a.type as AlertType) || 'TRADE_ALERT',
+        risk_type: a.risk_type as RiskAlertType | undefined,
+        risk_level: a.risk_level as RiskLevel | undefined,
+        risk_description: a.risk_description as string | undefined,
+        pattern: a.pattern as AlertPattern | undefined,
+        thesis: a.thesis as AlertThesis | undefined,
+        execution_candidate: a.execution_candidate as AlertExecutionCandidate | undefined,
+        confidence: typeof a.confidence === 'number' ? a.confidence : 0,
+        timeframe: (a.timeframe as '10m' | '1h' | '4h') || '10m',
+        expires_at: Date.now() + 10 * 60 * 1000, // 10 min expiry
+      }));
+    }
+
+    // Handle risk state overrides
+    let finalRecommendation = recommendation;
+    const riskNotes: string[] = Array.isArray(raw.risk_notes)
+      ? (raw.risk_notes as string[])
+      : [];
+
+    if (bundle.risk_state.kill_switch_active) {
+      finalRecommendation = 'BLOCK';
+      riskNotes.push('Kill switch activo: ' + (bundle.risk_state.kill_switch_reason || 'Sin razón'));
+    }
+
+    if (bundle.risk_state.cooldown_active && finalRecommendation === 'APPROVE') {
+      finalRecommendation = 'WAIT';
+      riskNotes.push('Cooldown activo hasta: ' + bundle.risk_state.cooldown_until);
+    }
+
+    const dailyLossRatio =
+      bundle.risk_state.daily_loss_usd / bundle.risk_state.max_daily_loss_usd;
+    if (dailyLossRatio > 0.5 && finalRecommendation === 'APPROVE') {
+      finalRecommendation = 'WAIT';
+      riskNotes.push(`Daily loss al ${(dailyLossRatio * 100).toFixed(0)}% del límite`);
+    }
+
+    return {
+      decision,
+      alerts,
+      risk_confidence: riskConfidence,
+      setup_confidence: setupConfidence,
+      timeframe_context: bundle.timeframe_context,
+      pattern: raw.pattern as AlertPattern | undefined,
+      thesis: raw.thesis as AlertThesis | undefined,
+      execution_candidate: raw.execution_candidate as AlertExecutionCandidate | undefined,
+      confidence,
+      recommendation: finalRecommendation,
+      risk_notes: riskNotes,
+      telemetry: {
+        market_price: bundle.market_state.current_price,
+        spread_bps: bundle.market_state.spread_bps,
+        whale_net_flow: bundle.whales.net_whale_flow_usd,
+        risk_utilization: dailyLossRatio,
+      },
+    };
   }
 }
 

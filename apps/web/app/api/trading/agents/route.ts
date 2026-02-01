@@ -3,9 +3,13 @@
  * OpenAI agent interactions for trading
  */
 
+// Vercel Serverless Function Configuration
+// Required for OpenAI API calls which can take 5-15 seconds
+export const maxDuration = 50; // seconds (Pro plan allows up to 60s)
+
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseServerClient } from '@kit/supabase/server-client';
-import { createTradingAgents, createSentinelAgent, type ToolHandlers } from '@kit/integrations/openai';
+import { createTradingAgents, createSentinelAgent, createAtlasAgent, type ToolHandlers } from '@kit/integrations/openai';
 import { createHyperliquidInfo } from '@kit/integrations/hyperliquid';
 import type {
   ExplanationRequest,
@@ -15,16 +19,30 @@ import type {
   AgentContext,
 } from '@kit/integrations/openai';
 import type { Json } from '@kit/supabase/database';
-import type { RealtimeBundle, SentinelRequest, SentinelResponse } from '@kit/trading-core';
+import type {
+  RealtimeBundle,
+  RealtimeBundleV2,
+  SentinelRequest,
+  SentinelResponse,
+  SentinelResponseV2,
+  SentinelAlertV2,
+  AlertType,
+  AtlasEntryRequest,
+  AtlasEntryBundle,
+  AtlasTradeRequest,
+  AtlasTradeBundle,
+  AtlasEntryResponse,
+  AtlasTradeResponse,
+} from '@kit/trading-core';
 
 // ============================================================================
 // SENTINEL AGENT CONFIGURATION
 // ============================================================================
 
 const SENTINEL_CONFIG = {
-  // Minimum confidence threshold (0.80 = 80%)
+  // V1: Minimum confidence threshold (0.80 = 80%)
   MIN_CONFIDENCE: 0.80,
-  // Cooldown between alerts for same symbol (5 minutes)
+  // V1: Cooldown between alerts for same symbol (5 minutes)
   COOLDOWN_MS: 5 * 60 * 1000,
   // Minimum Risk/Reward ratio
   MIN_RISK_REWARD: 1.5,
@@ -33,6 +51,90 @@ const SENTINEL_CONFIG = {
   // Block conflicting positions (opposite direction)
   BLOCK_CONFLICTING_POSITIONS: true,
 };
+
+// ============================================================================
+// SENTINEL V2 CONFIGURATION
+// ============================================================================
+
+const SENTINEL_V2_CONFIG = {
+  // Window size for cooldown (10 minutes)
+  WINDOW_SIZE_MS: 10 * 60 * 1000,
+  // Max RISK_ALERT per window per symbol
+  MAX_RISK_ALERTS_PER_WINDOW: 2,
+  // Max TRADE_ALERT per window per symbol
+  MAX_TRADE_ALERTS_PER_WINDOW: 1,
+  // Allow updating existing alert in same window
+  ALLOW_UPDATE_IN_WINDOW: true,
+  // Minimum risk_confidence for RISK_ALERT (0.70 = 70%)
+  MIN_RISK_CONFIDENCE: 0.70,
+  // Minimum setup_confidence for TRADE_ALERT (0.80 = 80%)
+  MIN_SETUP_CONFIDENCE: 0.80,
+  // Minimum confirmations for TRADE_ALERT
+  MIN_CONFIRMATIONS: 2,
+};
+
+/**
+ * Get the start timestamp of the current 10-minute window
+ */
+function getWindowStart(timestamp: number): number {
+  return Math.floor(timestamp / SENTINEL_V2_CONFIG.WINDOW_SIZE_MS)
+         * SENTINEL_V2_CONFIG.WINDOW_SIZE_MS;
+}
+
+/**
+ * Check if we can emit an alert or should update an existing one (V2)
+ */
+async function checkAlertWindowV2(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any,
+  userId: string,
+  symbol: string,
+  alertType: AlertType
+): Promise<{ canEmit: boolean; updateAlertId?: string; reason?: string }> {
+  const windowStart = getWindowStart(Date.now());
+  const maxAlerts = alertType === 'RISK_ALERT'
+    ? SENTINEL_V2_CONFIG.MAX_RISK_ALERTS_PER_WINDOW
+    : SENTINEL_V2_CONFIG.MAX_TRADE_ALERTS_PER_WINDOW;
+
+  const { data: existingAlerts } = await client
+    .from('agent_alerts')
+    .select('id, alert_type, created_at')
+    .eq('user_id', userId)
+    .eq('symbol', symbol)
+    .eq('alert_type', alertType)
+    .gte('created_at', new Date(windowStart).toISOString())
+    .order('created_at', { ascending: false })
+    .limit(maxAlerts);
+
+  if (!existingAlerts || existingAlerts.length < maxAlerts) {
+    return { canEmit: true };
+  }
+
+  // Already at max alerts for this window
+  if (SENTINEL_V2_CONFIG.ALLOW_UPDATE_IN_WINDOW && existingAlerts.length > 0) {
+    // Return the most recent alert ID for update
+    return {
+      canEmit: false,
+      updateAlertId: existingAlerts[0].id,
+      reason: `Max ${alertType} alerts reached for this 10m window, updating existing`,
+    };
+  }
+
+  return {
+    canEmit: false,
+    reason: `Max ${alertType} alerts (${maxAlerts}) reached for this 10m window`,
+  };
+}
+
+/**
+ * Count confirmations in a pattern
+ */
+function countConfirmations(pattern: unknown): number {
+  if (!pattern || typeof pattern !== 'object') return 0;
+  const p = pattern as { confirmations?: Record<string, boolean> };
+  if (!p.confirmations) return 0;
+  return Object.values(p.confirmations).filter(Boolean).length;
+}
 
 // ============================================================================
 // SENTINEL VALIDATION FUNCTIONS
@@ -514,6 +616,593 @@ export async function POST(request: NextRequest) {
             costUsd: sentinelResult.trace.costUsd,
           },
           validation: !validation.isValid ? { blocked: true, reason: validation.reason } : undefined,
+        });
+      }
+
+      // ========================================================================
+      // SENTINEL V2 - DUAL ALERT SYSTEM (RISK_ALERT + TRADE_ALERT)
+      // ========================================================================
+      case 'sentinel-v2': {
+        // Reuse tool handlers from V1
+        const toolHandlersV2: ToolHandlers = new Map();
+
+        toolHandlersV2.set('get_market_data', async (args) => {
+          try {
+            const info = createHyperliquidInfo();
+            const allData = await info.getParsedAssetCtxs();
+            return allData.find((d) => d.coin === args.symbol) || { error: 'Symbol not found' };
+          } catch (err) {
+            return { error: err instanceof Error ? err.message : 'Failed to fetch market data' };
+          }
+        });
+
+        toolHandlersV2.set('get_whale_events', async (args) => {
+          const minutesBack = typeof args.minutes_back === 'number' ? args.minutes_back : 30;
+          const symbolStr = typeof args.symbol === 'string' ? args.symbol : '';
+          const { data: whaleEvents } = await client
+            .from('whale_events')
+            .select('*')
+            .eq('symbol', symbolStr)
+            .gte('ts', new Date(Date.now() - minutesBack * 60000).toISOString())
+            .order('ts', { ascending: false })
+            .limit(20);
+          return whaleEvents || [];
+        });
+
+        toolHandlersV2.set('get_risk_state', async () => {
+          const today = new Date().toISOString().split('T')[0]!;
+          const { data: riskState } = await client
+            .from('risk_bumpers_state')
+            .select('*')
+            .eq('user_id', user.id)
+            .eq('trading_day', today)
+            .single();
+          return riskState || {
+            daily_loss_usd: 0,
+            daily_trades_count: 0,
+            cooldown_active: false,
+            kill_switch_active: false,
+          };
+        });
+
+        toolHandlersV2.set('get_price_levels', async (args) => {
+          try {
+            const info = createHyperliquidInfo();
+            const now = Date.now();
+            const symbolStr = typeof args.symbol === 'string' ? args.symbol : 'BTC';
+            const candles = await info.getCandles(
+              symbolStr,
+              '1h',
+              now - 24 * 60 * 60 * 1000,
+              now
+            );
+            const highs = candles.map((c) => c.h).sort((a, b) => b - a);
+            const lows = candles.map((c) => c.l).sort((a, b) => a - b);
+            return {
+              resistance_levels: highs.slice(0, 3),
+              support_levels: lows.slice(0, 3),
+            };
+          } catch {
+            return { resistance_levels: [], support_levels: [] };
+          }
+        });
+
+        const sentinelAgentV2 = createSentinelAgent(undefined, toolHandlersV2);
+        const bundleV2 = data.bundle as RealtimeBundleV2;
+
+        console.log('[Sentinel V2] Bundle received:', {
+          symbol: bundleV2.market_state?.symbol,
+          markPrice: bundleV2.market_state?.mark_price,
+          dynamicThreshold: bundleV2.dynamic_whale_threshold,
+          atrPercent: bundleV2.atr_percent,
+          tf10m_flow: bundleV2.timeframe_context?.tf_10m?.whale_net_flow_usd ?? 0,
+          tf1h_flow: bundleV2.timeframe_context?.tf_1h?.whale_net_flow_usd ?? 0,
+        });
+
+        // Use V2 analysis method
+        const sentinelResultV2 = await sentinelAgentV2.analyzeV2(
+          { bundle: bundleV2, strategy_id: userContext?.strategyId },
+          context
+        );
+
+        console.log('[Sentinel V2] Analysis complete:', {
+          symbol: bundleV2.market_state.symbol,
+          decision: sentinelResultV2.response.decision,
+          riskConfidence: sentinelResultV2.response.risk_confidence,
+          setupConfidence: sentinelResultV2.response.setup_confidence,
+          alertsCount: sentinelResultV2.response.alerts.length,
+          alertTypes: sentinelResultV2.response.alerts.map(a => a.type),
+        });
+
+        // Store trace first
+        const { data: traceDataV2 } = await client.from('agent_traces').insert({
+          user_id: user.id,
+          agent_name: 'sentinel-v2',
+          strategy_id: context.strategyId || null,
+          input_summary: `${bundleV2.market_state.symbol} sentinel-v2 analysis`,
+          output_json: sentinelResultV2.trace.output as Json,
+          tokens_input: sentinelResultV2.trace.tokensInput,
+          tokens_output: sentinelResultV2.trace.tokensOutput,
+          latency_ms: sentinelResultV2.trace.latencyMs,
+          model_used: sentinelResultV2.trace.model,
+          cost_usd: sentinelResultV2.trace.costUsd,
+        }).select('id').single();
+
+        // Process each alert in the response
+        const storedAlerts: { type: AlertType; id?: string; action: string }[] = [];
+
+        for (const alert of sentinelResultV2.response.alerts) {
+          // Check window-based cooldown
+          const windowCheck = await checkAlertWindowV2(
+            client,
+            user.id,
+            bundleV2.market_state.symbol,
+            alert.type
+          );
+
+          // Validate confidence thresholds
+          const meetsConfidence = alert.type === 'RISK_ALERT'
+            ? alert.confidence >= SENTINEL_V2_CONFIG.MIN_RISK_CONFIDENCE
+            : alert.confidence >= SENTINEL_V2_CONFIG.MIN_SETUP_CONFIDENCE;
+
+          // For TRADE_ALERT, also check confirmations
+          const meetsConfirmations = alert.type === 'TRADE_ALERT'
+            ? countConfirmations(alert.pattern || {}) >= SENTINEL_V2_CONFIG.MIN_CONFIRMATIONS
+            : true;
+
+          if (!meetsConfidence) {
+            storedAlerts.push({
+              type: alert.type,
+              action: `skipped: confidence ${(alert.confidence * 100).toFixed(0)}% below threshold`,
+            });
+            continue;
+          }
+
+          if (!meetsConfirmations) {
+            storedAlerts.push({
+              type: alert.type,
+              action: `skipped: insufficient confirmations`,
+            });
+            continue;
+          }
+
+          if (!windowCheck.canEmit && !windowCheck.updateAlertId) {
+            storedAlerts.push({
+              type: alert.type,
+              action: `skipped: ${windowCheck.reason}`,
+            });
+            continue;
+          }
+
+          // Prepare alert data
+          const alertSetup: 'LONG' | 'SHORT' | 'NONE' =
+            alert.pattern?.setup === 'LONG_SETUP' ? 'LONG' :
+            alert.pattern?.setup === 'SHORT_SETUP' ? 'SHORT' : 'NONE';
+
+          const alertData = {
+            user_id: user.id,
+            strategy_id: context.strategyId || null,
+            agent_trace_id: traceDataV2?.id || null,
+            symbol: bundleV2.market_state.symbol,
+            decision: 'ALERT' as const,
+            setup: alertSetup,
+            alert_type: alert.type,
+            risk_type: alert.risk_type || null,
+            risk_level: alert.risk_level || null,
+            timeframe: alert.timeframe,
+            pattern_json: (alert.pattern || {}) as unknown as Json,
+            thesis_json: (alert.thesis || {}) as unknown as Json,
+            execution_json: alert.execution_candidate as unknown as Json || null,
+            confidence: alert.confidence,
+            risk_confidence: sentinelResultV2.response.risk_confidence,
+            setup_confidence: sentinelResultV2.response.setup_confidence,
+            recommendation: sentinelResultV2.response.recommendation,
+            risk_notes: sentinelResultV2.response.risk_notes,
+            timeframe_context: bundleV2.timeframe_context as unknown as Json,
+            expires_at: new Date(alert.expires_at).toISOString(),
+            updates_alert_id: windowCheck.updateAlertId || null,
+          };
+
+          if (windowCheck.updateAlertId) {
+            // Update existing alert
+            await client.from('agent_alerts')
+              .update({
+                ...alertData,
+                updated_at: new Date().toISOString(),
+              })
+              .eq('id', windowCheck.updateAlertId)
+              .eq('user_id', user.id);
+
+            storedAlerts.push({
+              type: alert.type,
+              id: windowCheck.updateAlertId,
+              action: 'updated',
+            });
+            console.log(`[Sentinel V2] ✅ ${alert.type} updated: ${windowCheck.updateAlertId}`);
+          } else {
+            // Insert new alert
+            const { data: insertedAlert } = await client.from('agent_alerts')
+              .insert(alertData)
+              .select('id')
+              .single();
+
+            storedAlerts.push({
+              type: alert.type,
+              id: insertedAlert?.id,
+              action: 'created',
+            });
+            console.log(`[Sentinel V2] ✅ ${alert.type} created: ${insertedAlert?.id}`);
+          }
+        }
+
+        return NextResponse.json({
+          response: sentinelResultV2.response,
+          trace: {
+            agentName: sentinelResultV2.trace.agentName,
+            latencyMs: sentinelResultV2.trace.latencyMs,
+            tokensUsed: sentinelResultV2.trace.tokensInput + sentinelResultV2.trace.tokensOutput,
+            costUsd: sentinelResultV2.trace.costUsd,
+          },
+          storedAlerts,
+        });
+      }
+
+      // ========================================================================
+      // ATLAS ENTRY GATEKEEPING (5-minute interval)
+      // ========================================================================
+      case 'atlas-entry': {
+        const atlasToolHandlers: ToolHandlers = new Map();
+
+        atlasToolHandlers.set('get_current_price', async (args) => {
+          try {
+            const info = createHyperliquidInfo();
+            const allData = await info.getParsedAssetCtxs();
+            const asset = allData.find((d) => d.coin === args.symbol);
+            return asset ? { mid: asset.markPrice, bid: asset.markPrice * 0.999, ask: asset.markPrice * 1.001 } : { error: 'Symbol not found' };
+          } catch (err) {
+            return { error: err instanceof Error ? err.message : 'Failed to fetch price' };
+          }
+        });
+
+        atlasToolHandlers.set('get_liquidation_data', async () => {
+          // Note: liquidation_events table may not exist yet - return empty data
+          return {
+            total_usd: 0,
+            longs_usd: 0,
+            shorts_usd: 0,
+          };
+        });
+
+        atlasToolHandlers.set('get_order_status', async (args) => {
+          const orderId = String(args.order_id || '');
+          const { data: order } = await client
+            .from('paper_orders')
+            .select('*')
+            .eq('id', orderId)
+            .single();
+          return order || { error: 'Order not found' };
+        });
+
+        atlasToolHandlers.set('get_position_details', async (args) => {
+          const tradeId = String(args.trade_id || '');
+          const { data: position } = await client
+            .from('paper_orders')
+            .select('*')
+            .eq('id', tradeId)
+            .eq('status', 'open')
+            .single();
+          return position || { error: 'Position not found' };
+        });
+
+        console.log('[Atlas Entry] Creating agent...');
+        const atlasAgent = createAtlasAgent(undefined, atlasToolHandlers);
+        const entryBundle = data.bundle as AtlasEntryBundle;
+
+        console.log('[Atlas Entry] Bundle received:', {
+          candidates: entryBundle.alert_candidates?.length ?? 0,
+          equity: entryBundle.portfolio_state?.equity_usd,
+          killSwitch: entryBundle.portfolio_state?.kill_switch_active,
+        });
+
+        const atlasEntryRequest: AtlasEntryRequest = {
+          bundle: entryBundle,
+          strategy_id: userContext?.strategyId,
+        };
+
+        console.log('[Atlas Entry] Calling OpenAI agent...');
+        let entryResult;
+        let entryResponse: AtlasEntryResponse;
+        try {
+          entryResult = await atlasAgent.analyzeEntries(atlasEntryRequest, context);
+          entryResponse = entryResult.response as AtlasEntryResponse;
+        } catch (agentError) {
+          console.error('[Atlas Entry] Agent error:', agentError);
+          return NextResponse.json(
+            { error: `Atlas Entry Agent failed: ${agentError instanceof Error ? agentError.message : 'Unknown error'}` },
+            { status: 500 }
+          );
+        }
+
+        console.log('[Atlas Entry] Analysis complete:', {
+          globalStatus: entryResponse.global_governor.status,
+          globalAction: entryResponse.global_governor.action,
+          entriesApproved: entryResponse.entry_gatekeeping.filter(e => e.decision === 'APPROVE_ENTRY').length,
+          entriesWait: entryResponse.entry_gatekeeping.filter(e => e.decision === 'WAIT').length,
+          entriesBlocked: entryResponse.entry_gatekeeping.filter(e => e.decision === 'BLOCK').length,
+        });
+
+        // Store Atlas cycle record (non-blocking - table may not exist yet)
+        const cycleId = entryResponse.analysis_log.cycle_id;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (client as any).from('atlas_cycles').insert({
+            user_id: user.id,
+            cycle_id: cycleId,
+            cycle_type: 'entry',
+            cycle_ts: new Date().toISOString(),
+            global_status: entryResponse.global_governor.status,
+            global_action: entryResponse.global_governor.action,
+            global_reasons: entryResponse.global_governor.reasons,
+            entries_approved: entryResponse.entry_gatekeeping.filter(e => e.decision === 'APPROVE_ENTRY').length,
+            entries_wait: entryResponse.entry_gatekeeping.filter(e => e.decision === 'WAIT').length,
+            entries_blocked: entryResponse.entry_gatekeeping.filter(e => e.decision === 'BLOCK').length,
+            trades_reviewed: 0,
+            total_actions_proposed: 0,
+            full_response_json: entryResponse as unknown as Json,
+            latency_ms: entryResult.trace.latencyMs,
+            tokens_input: entryResult.trace.tokensInput,
+            tokens_output: entryResult.trace.tokensOutput,
+            cost_usd: entryResult.trace.costUsd,
+          });
+        } catch (dbError) {
+          console.warn('[Atlas Entry] Failed to store cycle (table may not exist):', dbError);
+        }
+
+        // Update alert status based on decisions (non-blocking)
+        for (const decision of entryResponse.entry_gatekeeping) {
+          const newStatus = decision.decision === 'APPROVE_ENTRY' ? 'actioned' :
+                           decision.decision === 'BLOCK' ? 'dismissed' : 'new';
+
+          if (newStatus !== 'new') {
+            try {
+              await client
+                .from('agent_alerts')
+                .update({
+                  status: newStatus,
+                  actioned_at: newStatus === 'actioned' ? new Date().toISOString() : null,
+                })
+                .eq('id', decision.candidate_id)
+                .eq('user_id', user.id);
+              console.log(`[Atlas Entry] Alert ${decision.candidate_id} marked as ${newStatus}`);
+            } catch (alertError) {
+              console.warn('[Atlas Entry] Failed to update alert status:', alertError);
+            }
+          }
+        }
+
+        // Store trace (non-blocking)
+        try {
+          await client.from('agent_traces').insert({
+            user_id: user.id,
+            agent_name: 'atlas-entry',
+            strategy_id: context.strategyId || null,
+            input_summary: `Atlas Entry Gatekeeping: ${entryBundle.alert_candidates.length} candidates`,
+            output_json: entryResult.trace.output as Json,
+            tokens_input: entryResult.trace.tokensInput,
+            tokens_output: entryResult.trace.tokensOutput,
+            latency_ms: entryResult.trace.latencyMs,
+            model_used: entryResult.trace.model,
+            cost_usd: entryResult.trace.costUsd,
+          });
+        } catch (traceError) {
+          console.warn('[Atlas Entry] Failed to store trace:', traceError);
+        }
+
+        return NextResponse.json({
+          response: entryResponse,
+          trace: {
+            agentName: entryResult.trace.agentName,
+            latencyMs: entryResult.trace.latencyMs,
+            tokensUsed: entryResult.trace.tokensInput + entryResult.trace.tokensOutput,
+            costUsd: entryResult.trace.costUsd,
+          },
+        });
+      }
+
+      // ========================================================================
+      // ATLAS TRADE MANAGEMENT (10-minute interval)
+      // ========================================================================
+      case 'atlas-trades': {
+        const atlasToolHandlers: ToolHandlers = new Map();
+
+        atlasToolHandlers.set('get_current_price', async (args) => {
+          try {
+            const info = createHyperliquidInfo();
+            const allData = await info.getParsedAssetCtxs();
+            const asset = allData.find((d) => d.coin === args.symbol);
+            return asset ? { mid: asset.markPrice, bid: asset.markPrice * 0.999, ask: asset.markPrice * 1.001 } : { error: 'Symbol not found' };
+          } catch (err) {
+            return { error: err instanceof Error ? err.message : 'Failed to fetch price' };
+          }
+        });
+
+        atlasToolHandlers.set('get_liquidation_data', async () => {
+          // Note: liquidation_events table may not exist yet - return empty data
+          return {
+            total_usd: 0,
+            longs_usd: 0,
+            shorts_usd: 0,
+          };
+        });
+
+        atlasToolHandlers.set('get_order_status', async (args) => {
+          const orderId = String(args.order_id || '');
+          const { data: order } = await client
+            .from('paper_orders')
+            .select('*')
+            .eq('id', orderId)
+            .single();
+          return order || { error: 'Order not found' };
+        });
+
+        atlasToolHandlers.set('get_position_details', async (args) => {
+          const tradeId = String(args.trade_id || '');
+          const { data: position } = await client
+            .from('paper_orders')
+            .select('*')
+            .eq('id', tradeId)
+            .eq('status', 'open')
+            .single();
+          return position || { error: 'Position not found' };
+        });
+
+        console.log('[Atlas Trades] Creating agent...');
+        const atlasAgent = createAtlasAgent(undefined, atlasToolHandlers);
+        const tradeBundle = data.bundle as AtlasTradeBundle;
+
+        console.log('[Atlas Trades] Bundle received:', {
+          openTrades: tradeBundle.open_trades?.length ?? 0,
+          equity: tradeBundle.portfolio_state?.equity_usd,
+          killSwitch: tradeBundle.portfolio_state?.kill_switch_active,
+        });
+
+        const atlasTradeRequest: AtlasTradeRequest = {
+          bundle: tradeBundle,
+          strategy_id: userContext?.strategyId,
+        };
+
+        console.log('[Atlas Trades] Calling OpenAI agent...');
+        let tradeResult;
+        let tradeResponse: AtlasTradeResponse;
+        try {
+          tradeResult = await atlasAgent.manageTrades(atlasTradeRequest, context);
+          tradeResponse = tradeResult.response as AtlasTradeResponse;
+        } catch (agentError) {
+          console.error('[Atlas Trades] Agent error:', agentError);
+          return NextResponse.json(
+            { error: `Atlas Trades Agent failed: ${agentError instanceof Error ? agentError.message : 'Unknown error'}` },
+            { status: 500 }
+          );
+        }
+
+        console.log('[Atlas Trades] Analysis complete:', {
+          globalStatus: tradeResponse.global_governor.status,
+          globalAction: tradeResponse.global_governor.action,
+          tradesReviewed: tradeResponse.trade_management.length,
+          totalActions: tradeResponse.trade_management.reduce((sum, tm) => sum + (tm.actions?.length || 0), 0),
+        });
+
+        // Store Atlas cycle record (non-blocking - table may not exist yet)
+        const cycleId = tradeResponse.analysis_log.cycle_id;
+        const totalActions = tradeResponse.trade_management.reduce((sum, tm) => sum + (tm.actions?.length || 0), 0);
+
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (client as any).from('atlas_cycles').insert({
+            user_id: user.id,
+            cycle_id: cycleId,
+            cycle_type: 'trade',
+            cycle_ts: new Date().toISOString(),
+            global_status: tradeResponse.global_governor.status,
+            global_action: tradeResponse.global_governor.action,
+            global_reasons: tradeResponse.global_governor.reasons,
+            entries_approved: 0,
+            entries_wait: 0,
+            entries_blocked: 0,
+            trades_reviewed: tradeResponse.trade_management.length,
+            total_actions_proposed: totalActions,
+            improvement_plan_json: tradeResponse.improvement_plan as unknown as Json,
+            full_response_json: tradeResponse as unknown as Json,
+            latency_ms: tradeResult.trace.latencyMs,
+            tokens_input: tradeResult.trace.tokensInput,
+            tokens_output: tradeResult.trace.tokensOutput,
+            cost_usd: tradeResult.trace.costUsd,
+          });
+        } catch (dbError) {
+          console.warn('[Atlas Trades] Failed to store cycle (table may not exist):', dbError);
+        }
+
+        // Store reviews and decisions for each trade (non-blocking)
+        for (const tm of tradeResponse.trade_management) {
+          try {
+            // Insert review
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const { data: reviewData } = await (client as any).from('atlas_reviews').insert({
+              user_id: user.id,
+              trade_id: tm.trade_id,
+              cycle_id: cycleId,
+              progress_assessment: tm.review.progress_assessment,
+              category: tm.category,
+              mfe_usd: tm.risk_snapshot.mfe_usd || 0,
+              mae_usd: tm.risk_snapshot.mae_usd || 0,
+              unrealized_pnl_usd: tm.risk_snapshot.unrealized_pnl_usd || 0,
+              age_sec: tm.risk_snapshot.age_sec || 0,
+              actions_proposed: tm.actions as unknown as Json,
+              notes_json: {
+                management_thesis: tm.management_thesis,
+                profit_optimization_notes: tm.profit_optimization_notes,
+                confidence: tm.confidence,
+              } as unknown as Json,
+            }).select('id').single();
+
+            // Insert decisions for each action
+            if (tm.actions && tm.actions.length > 0) {
+              for (const action of tm.actions) {
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                await (client as any).from('atlas_decisions').insert({
+                  user_id: user.id,
+                  trade_id: tm.trade_id,
+                  review_id: reviewData?.id || null,
+                  action_type: action.type,
+                  payload_json: action.payload as unknown as Json,
+                  status: 'pending',
+                });
+              }
+            }
+
+            // Update paper_order with review info
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            await (client as any)
+              .from('paper_orders')
+              .update({
+                last_review_ts: new Date().toISOString(),
+                review_count: (tradeBundle.open_trades.find(t => t.trade_id === tm.trade_id)?.review_count ?? 0) + 1,
+                mfe_usd: tm.risk_snapshot.mfe_usd || 0,
+                mae_usd: tm.risk_snapshot.mae_usd || 0,
+              })
+              .eq('id', tm.trade_id)
+              .eq('user_id', user.id);
+          } catch (reviewError) {
+            console.warn(`[Atlas Trades] Failed to store review for trade ${tm.trade_id}:`, reviewError);
+          }
+        }
+
+        // Store trace (non-blocking)
+        try {
+          await client.from('agent_traces').insert({
+            user_id: user.id,
+            agent_name: 'atlas-trades',
+            strategy_id: context.strategyId || null,
+            input_summary: `Atlas Trade Management: ${tradeBundle.open_trades.length} trades`,
+            output_json: tradeResult.trace.output as Json,
+            tokens_input: tradeResult.trace.tokensInput,
+            tokens_output: tradeResult.trace.tokensOutput,
+            latency_ms: tradeResult.trace.latencyMs,
+            model_used: tradeResult.trace.model,
+            cost_usd: tradeResult.trace.costUsd,
+          });
+        } catch (traceError) {
+          console.warn('[Atlas Trades] Failed to store trace:', traceError);
+        }
+
+        return NextResponse.json({
+          response: tradeResponse,
+          trace: {
+            agentName: tradeResult.trace.agentName,
+            latencyMs: tradeResult.trace.latencyMs,
+            tokensUsed: tradeResult.trace.tokensInput + tradeResult.trace.tokensOutput,
+            costUsd: tradeResult.trace.costUsd,
+          },
         });
       }
 
