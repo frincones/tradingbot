@@ -3,6 +3,9 @@
  * POST: Close an open paper order
  */
 
+// Vercel Serverless Function Configuration
+export const maxDuration = 30; // seconds
+
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseServerClient } from '@kit/supabase/server-client';
 import type { ClosePaperOrderInput, PaperOrderStatus } from '@kit/trading-core';

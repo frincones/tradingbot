@@ -3,6 +3,9 @@
  * Hyperliquid and Alpaca market data access
  */
 
+// Vercel Serverless Function Configuration
+export const maxDuration = 30; // seconds
+
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseServerClient } from '@kit/supabase/server-client';
 import { createHyperliquidInfo } from '@kit/integrations/hyperliquid';
