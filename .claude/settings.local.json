@@ -1,17 +1,59 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git init:*)",
-      "Bash(git remote add:*)",
-      "Bash(git remote set-url:*)",
       "Bash(git add:*)",
-      "Bash(git branch:*)",
-      "Bash(git commit -m \"$\\(cat <<''EOF''\nInitial commit: Next.js SaaS Starter Kit\n\nSetup project with makerkit/nextjs-saas-starter-kit-lite template\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit:*)",
       "Bash(git push:*)",
+      "Bash(git pull:*)",
+      "Bash(git fetch:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git branch:*)",
+      "Bash(git checkout:*)",
+      "Bash(git stash:*)",
+      "Bash(git remote:*)",
+      "Bash(git init:*)",
       "Bash(pnpm install:*)",
       "Bash(pnpm dev:*)",
+      "Bash(pnpm build:*)",
+      "Bash(pnpm test:*)",
+      "Bash(pnpm typecheck:*)",
+      "Bash(pnpm lint:*)",
+      "Bash(pnpm format:*)",
+      "Bash(pnpm supabase:*)",
+      "Bash(npx supabase:*)",
+      "Bash(npx playwright:*)",
+      "Bash(npx tsx:*)",
+      "Bash(npx tsc:*)",
       "Bash(curl:*)",
-      "Bash(git commit -m \"$\\(cat <<''EOF''\nchore: update Claude local settings\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
-    ]
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(node:*)",
+      "Bash(npm:*)",
+      "Bash(tree:*)",
+      "WebSearch",
+      "mcp__supabase__execute_sql",
+      "mcp__supabase__list_tables",
+      "mcp__supabase__apply_migration",
+      "mcp__supabase__get_project_url",
+      "mcp__supabase__list_migrations",
+      "mcp__supabase__generate_typescript_types"
+    ],
+    "deny": [],
+    "ask": []
+  },
+  "mcpServers": {
+    "supabase": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-supabase@latest"
+      ],
+      "env": {
+        "SUPABASE_URL": "https://vokwlwknebbpmeowyqgt.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZva3dsd2tuZWJicG1lb3d5cWd0Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2OTg5ODA5OCwiZXhwIjoyMDg1NDc0MDk4fQ.HokjiGInKfdqDreXRsBbLesEq4pcrLSl0J9TESESbok"
+      }
+    }
   }
 }
