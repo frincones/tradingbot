@@ -111,7 +111,7 @@ export function usePatternAnalysis(): UsePatternAnalysisReturn {
   // Calculate best and worst patterns by P&L
   const sortedByPnl = [...patterns].sort((a, b) => (b.total_pnl || 0) - (a.total_pnl || 0));
   const bestPattern = sortedByPnl[0] || null;
-  const worstPattern = sortedByPnl.length > 0 ? sortedByPnl[sortedByPnl.length - 1] : null;
+  const worstPattern = (sortedByPnl.length > 0 ? sortedByPnl[sortedByPnl.length - 1] : null) || null;
 
   return {
     patterns,

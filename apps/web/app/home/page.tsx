@@ -7,7 +7,7 @@ import { LoadingOverlay } from '@kit/ui/loading-overlay';
 
 // Dynamically import KPI Dashboard (client component with hooks)
 const KPIDashboard = dynamic(
-  () => import('./_components/kpi-dashboard').then((mod) => mod.KPIDashboard),
+  () => import('./_components/kpis').then((mod) => mod.KPIDashboard),
   {
     ssr: false,
     loading: () => (
