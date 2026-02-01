@@ -15,7 +15,232 @@ import type {
   AgentContext,
 } from '@kit/integrations/openai';
 import type { Json } from '@kit/supabase/database';
-import type { RealtimeBundle, SentinelRequest } from '@kit/trading-core';
+import type { RealtimeBundle, SentinelRequest, SentinelResponse } from '@kit/trading-core';
+
+// ============================================================================
+// SENTINEL AGENT CONFIGURATION
+// ============================================================================
+
+const SENTINEL_CONFIG = {
+  // Minimum confidence threshold (0.80 = 80%)
+  MIN_CONFIDENCE: 0.80,
+  // Cooldown between alerts for same symbol (5 minutes)
+  COOLDOWN_MS: 5 * 60 * 1000,
+  // Minimum Risk/Reward ratio
+  MIN_RISK_REWARD: 1.5,
+  // Minimum stop loss distance from entry (1%)
+  MIN_STOP_LOSS_PCT: 1.0,
+  // Block conflicting positions (opposite direction)
+  BLOCK_CONFLICTING_POSITIONS: true,
+};
+
+// ============================================================================
+// SENTINEL VALIDATION FUNCTIONS
+// ============================================================================
+
+interface ValidationResult {
+  isValid: boolean;
+  reason?: string;
+}
+
+/**
+ * Check if there's a recent alert for the same symbol (cooldown)
+ */
+async function checkAlertCooldown(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any,
+  userId: string,
+  symbol: string
+): Promise<ValidationResult> {
+  const cooldownStart = new Date(Date.now() - SENTINEL_CONFIG.COOLDOWN_MS).toISOString();
+
+  const { data: recentAlerts } = await client
+    .from('agent_alerts')
+    .select('id, created_at, setup')
+    .eq('user_id', userId)
+    .eq('symbol', symbol)
+    .eq('decision', 'ALERT')
+    .gte('created_at', cooldownStart)
+    .limit(1);
+
+  if (recentAlerts && recentAlerts.length > 0) {
+    const lastAlert = recentAlerts[0] as { id: string; created_at: string; setup: string };
+    const timeSince = Date.now() - new Date(lastAlert.created_at).getTime();
+    const remainingCooldown = Math.ceil((SENTINEL_CONFIG.COOLDOWN_MS - timeSince) / 1000);
+
+    return {
+      isValid: false,
+      reason: `Cooldown active: ${remainingCooldown}s remaining since last ${symbol} alert`,
+    };
+  }
+
+  return { isValid: true };
+}
+
+/**
+ * Check if there are open paper orders in conflicting direction
+ */
+async function checkConflictingPositions(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any,
+  userId: string,
+  symbol: string,
+  proposedSetup: 'LONG' | 'SHORT'
+): Promise<ValidationResult> {
+  if (!SENTINEL_CONFIG.BLOCK_CONFLICTING_POSITIONS) {
+    return { isValid: true };
+  }
+
+  const { data: openOrders } = await client
+    .from('paper_orders')
+    .select('id, side, entry_price')
+    .eq('user_id', userId)
+    .eq('symbol', symbol)
+    .eq('status', 'open');
+
+  if (openOrders && openOrders.length > 0) {
+    const orders = openOrders as Array<{ id: string; side: string; entry_price: number }>;
+    const hasConflicting = orders.some(
+      (order) => order.side !== proposedSetup
+    );
+
+    if (hasConflicting) {
+      const conflictingSide = proposedSetup === 'LONG' ? 'SHORT' : 'LONG';
+      return {
+        isValid: false,
+        reason: `Conflicting position: Open ${conflictingSide} orders exist for ${symbol}`,
+      };
+    }
+  }
+
+  return { isValid: true };
+}
+
+/**
+ * Validate confidence threshold
+ */
+function validateConfidence(confidence: number): ValidationResult {
+  if (confidence < SENTINEL_CONFIG.MIN_CONFIDENCE) {
+    return {
+      isValid: false,
+      reason: `Confidence ${(confidence * 100).toFixed(0)}% below threshold ${(SENTINEL_CONFIG.MIN_CONFIDENCE * 100).toFixed(0)}%`,
+    };
+  }
+  return { isValid: true };
+}
+
+/**
+ * Validate Risk/Reward ratio and stop loss placement
+ */
+function validateRiskReward(
+  response: SentinelResponse,
+  currentPrice: number
+): ValidationResult {
+  const exec = response.execution_candidate;
+  if (!exec) {
+    return { isValid: true }; // No execution candidate, can't validate
+  }
+
+  const entryPrice = exec.entry_zone?.ideal ||
+    (exec.entry_zone?.min && exec.entry_zone?.max
+      ? (exec.entry_zone.min + exec.entry_zone.max) / 2
+      : currentPrice);
+
+  const stopLossPrice = typeof exec.stop_loss === 'object'
+    ? exec.stop_loss.price
+    : exec.stop_loss;
+
+  const takeProfitPrice = exec.take_profit ||
+    (exec.take_profit_targets?.[0]?.price);
+
+  if (!stopLossPrice || !takeProfitPrice) {
+    return { isValid: true }; // Missing data, can't validate
+  }
+
+  const setup = response.pattern?.setup;
+  const isLong = setup === 'LONG_SETUP';
+
+  // Calculate risk and reward
+  let riskPct: number;
+  let rewardPct: number;
+
+  if (isLong) {
+    riskPct = Math.abs((entryPrice - stopLossPrice) / entryPrice) * 100;
+    rewardPct = Math.abs((takeProfitPrice - entryPrice) / entryPrice) * 100;
+  } else {
+    riskPct = Math.abs((stopLossPrice - entryPrice) / entryPrice) * 100;
+    rewardPct = Math.abs((entryPrice - takeProfitPrice) / entryPrice) * 100;
+  }
+
+  // Check minimum stop loss distance
+  if (riskPct < SENTINEL_CONFIG.MIN_STOP_LOSS_PCT) {
+    return {
+      isValid: false,
+      reason: `Stop loss too tight: ${riskPct.toFixed(2)}% (min: ${SENTINEL_CONFIG.MIN_STOP_LOSS_PCT}%)`,
+    };
+  }
+
+  // Check R:R ratio
+  const riskRewardRatio = rewardPct / riskPct;
+  if (riskRewardRatio < SENTINEL_CONFIG.MIN_RISK_REWARD) {
+    return {
+      isValid: false,
+      reason: `R:R ratio ${riskRewardRatio.toFixed(2)} below minimum ${SENTINEL_CONFIG.MIN_RISK_REWARD}`,
+    };
+  }
+
+  return { isValid: true };
+}
+
+/**
+ * Run all validations on the sentinel response
+ */
+async function validateSentinelAlert(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  client: any,
+  userId: string,
+  symbol: string,
+  currentPrice: number,
+  response: SentinelResponse
+): Promise<ValidationResult> {
+  // Only validate if decision is ALERT
+  if (response.decision !== 'ALERT') {
+    return { isValid: true };
+  }
+
+  const setup = response.pattern?.setup === 'LONG_SETUP' ? 'LONG' : 'SHORT';
+
+  // 1. Check confidence threshold
+  const confidenceCheck = validateConfidence(response.confidence);
+  if (!confidenceCheck.isValid) {
+    console.log('[Sentinel Validation] ❌ Confidence check failed:', confidenceCheck.reason);
+    return confidenceCheck;
+  }
+
+  // 2. Check cooldown
+  const cooldownCheck = await checkAlertCooldown(client, userId, symbol);
+  if (!cooldownCheck.isValid) {
+    console.log('[Sentinel Validation] ❌ Cooldown check failed:', cooldownCheck.reason);
+    return cooldownCheck;
+  }
+
+  // 3. Check conflicting positions
+  const conflictCheck = await checkConflictingPositions(client, userId, symbol, setup);
+  if (!conflictCheck.isValid) {
+    console.log('[Sentinel Validation] ❌ Conflict check failed:', conflictCheck.reason);
+    return conflictCheck;
+  }
+
+  // 4. Check R:R and stop loss
+  const rrCheck = validateRiskReward(response, currentPrice);
+  if (!rrCheck.isValid) {
+    console.log('[Sentinel Validation] ❌ R:R check failed:', rrCheck.reason);
+    return rrCheck;
+  }
+
+  console.log('[Sentinel Validation] ✅ All checks passed');
+  return { isValid: true };
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -202,10 +427,34 @@ export async function POST(request: NextRequest) {
           reasoning: sentinelResult.response.thesis?.reasoning?.substring(0, 200),
         });
 
-        // Store alert if decision is ALERT
-        if (sentinelResult.response.decision === 'ALERT' && sentinelResult.response.pattern) {
-          const alertSetup = sentinelResult.response.pattern.setup === 'LONG_SETUP' ? 'LONG' :
-                            sentinelResult.response.pattern.setup === 'SHORT_SETUP' ? 'SHORT' : 'NONE';
+        // Validate alert before storing
+        const validation = await validateSentinelAlert(
+          client,
+          user.id,
+          data.bundle.market_state.symbol,
+          data.bundle.market_state.mark_price,
+          sentinelResult.response
+        );
+
+        // If validation fails, modify the response to NO_ALERT and add reason
+        let finalResponse = sentinelResult.response;
+        if (!validation.isValid && sentinelResult.response.decision === 'ALERT') {
+          console.log('[Sentinel Agent] Alert blocked by validation:', validation.reason);
+          finalResponse = {
+            ...sentinelResult.response,
+            decision: 'NO_ALERT',
+            recommendation: 'WAIT',
+            risk_notes: [
+              ...(sentinelResult.response.risk_notes || []),
+              `[BLOCKED] ${validation.reason}`,
+            ],
+          };
+        }
+
+        // Store alert if decision is ALERT and validation passed
+        if (finalResponse.decision === 'ALERT' && finalResponse.pattern) {
+          const alertSetup = finalResponse.pattern.setup === 'LONG_SETUP' ? 'LONG' :
+                            finalResponse.pattern.setup === 'SHORT_SETUP' ? 'SHORT' : 'NONE';
 
           // Store trace first to get ID
           const { data: traceData } = await client.from('agent_traces').insert({
@@ -227,23 +476,26 @@ export async function POST(request: NextRequest) {
             strategy_id: context.strategyId || null,
             agent_trace_id: traceData?.id || null,
             symbol: data.bundle.market_state.symbol,
-            decision: sentinelResult.response.decision,
+            decision: finalResponse.decision,
             setup: alertSetup,
-            pattern_json: sentinelResult.response.pattern as unknown as Json,
-            thesis_json: sentinelResult.response.thesis as unknown as Json || {},
-            execution_json: sentinelResult.response.execution_candidate as unknown as Json || null,
-            confidence: sentinelResult.response.confidence,
-            recommendation: sentinelResult.response.recommendation,
-            risk_notes: sentinelResult.response.risk_notes,
+            pattern_json: finalResponse.pattern as unknown as Json,
+            thesis_json: finalResponse.thesis as unknown as Json || {},
+            execution_json: finalResponse.execution_candidate as unknown as Json || null,
+            confidence: finalResponse.confidence,
+            recommendation: finalResponse.recommendation,
+            risk_notes: finalResponse.risk_notes,
             expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5 min expiry
           });
+
+          console.log('[Sentinel Agent] ✅ Alert stored successfully');
         } else {
-          // Still store trace even if no alert
+          // Still store trace even if no alert (or blocked)
+          const blockedReason = !validation.isValid ? ` (blocked: ${validation.reason})` : '';
           await client.from('agent_traces').insert({
             user_id: user.id,
             agent_name: 'sentinel',
             strategy_id: context.strategyId || null,
-            input_summary: `${data.bundle.market_state.symbol} sentinel analysis (no alert)`,
+            input_summary: `${data.bundle.market_state.symbol} sentinel analysis (no alert${blockedReason})`,
             output_json: sentinelResult.trace.output as Json,
             tokens_input: sentinelResult.trace.tokensInput,
             tokens_output: sentinelResult.trace.tokensOutput,
@@ -254,13 +506,14 @@ export async function POST(request: NextRequest) {
         }
 
         return NextResponse.json({
-          response: sentinelResult.response,
+          response: finalResponse,
           trace: {
             agentName: sentinelResult.trace.agentName,
             latencyMs: sentinelResult.trace.latencyMs,
             tokensUsed: sentinelResult.trace.tokensInput + sentinelResult.trace.tokensOutput,
             costUsd: sentinelResult.trace.costUsd,
           },
+          validation: !validation.isValid ? { blocked: true, reason: validation.reason } : undefined,
         });
       }
 
