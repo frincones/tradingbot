@@ -18,7 +18,10 @@
     "./require-user": "./src/require-user.ts",
     "./hooks/*": "./src/hooks/*.ts",
     "./database": "./src/database.types.ts",
-    "./auth": "./src/auth.ts"
+    "./auth": "./src/auth.ts",
+    "./trading": "./src/trading/index.ts",
+    "./trading/queries": "./src/trading/queries.ts",
+    "./trading/realtime": "./src/trading/realtime.ts"
   },
   "devDependencies": {
     "@kit/eslint-config": "workspace:*",

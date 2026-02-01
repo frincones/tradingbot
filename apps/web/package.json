@@ -36,8 +36,10 @@
     "@kit/accounts": "workspace:*",
     "@kit/auth": "workspace:*",
     "@kit/i18n": "workspace:*",
+    "@kit/integrations": "workspace:*",
     "@kit/next": "workspace:*",
     "@kit/supabase": "workspace:*",
+    "@kit/trading-core": "workspace:*",
     "@kit/ui": "workspace:*",
     "@makerkit/data-loader-supabase-core": "^0.0.10",
     "@makerkit/data-loader-supabase-nextjs": "^1.2.5",
@@ -47,6 +49,7 @@
     "@tanstack/react-query": "5.90.2",
     "@tanstack/react-table": "^8.21.3",
     "date-fns": "^4.1.0",
+    "lightweight-charts": "^5.1.0",
     "lucide-react": "^0.545.0",
     "next": "15.5.9",
     "next-sitemap": "^4.2.3",
@@ -70,6 +73,7 @@
     "@types/node": "^24.7.1",
     "@types/react": "19.2.7",
     "@types/react-dom": "19.2.3",
+    "@types/ws": "^8.18.1",
     "autoprefixer": "^10.4.21",
     "babel-plugin-react-compiler": "19.1.0-rc.3",
     "dotenv-cli": "^10.0.0",
@@ -79,7 +83,8 @@
     "supabase": "^2.48.3",
     "tailwindcss": "4.1.14",
     "tailwindcss-animate": "^1.0.7",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "ws": "^8.18.3"
   },
   "prettier": "@kit/prettier-config",
   "browserslist": [
