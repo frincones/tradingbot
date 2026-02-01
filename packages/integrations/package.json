@@ -16,10 +16,10 @@
   "dependencies": {
     "@kit/trading-core": "workspace:*",
     "openai": "^4.25.0",
-    "ws": "^8.16.0"
+    "ws": "^8.18.3"
   },
   "devDependencies": {
-    "@types/ws": "^8.5.10",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.9.3"
   }
 }
