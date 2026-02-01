@@ -10,7 +10,7 @@ import { useState, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@kit/ui/tabs';
 import { Badge } from '@kit/ui/badge';
-import { Activity, Wallet, TrendingUp, BarChart3, Wifi, WifiOff, Fish, Flame, BellRing, PlayCircle } from 'lucide-react';
+import { Activity, Wallet, TrendingUp, BarChart3, Wifi, WifiOff, Fish, Flame, BellRing, PlayCircle, Brain } from 'lucide-react';
 import { useHyperliquidWS, type HLWSActiveAssetData } from '~/lib/hooks/use-hyperliquid-ws';
 import { useAlertCollector } from '~/lib/hooks/use-alert-collector';
 import { usePaperOrders } from '~/lib/hooks/use-paper-orders';
@@ -83,6 +83,11 @@ const AlertsFeed = dynamic(
 
 const PaperOrdersList = dynamic(
   () => import('./_components/paper-orders-list').then((mod) => mod.PaperOrdersList),
+  { ssr: false, loading: () => <Skeleton className="h-full" /> }
+);
+
+const AtlasPanel = dynamic(
+  () => import('./_components/atlas-panel').then((mod) => mod.AtlasPanel),
   { ssr: false, loading: () => <Skeleton className="h-full" /> }
 );
 
@@ -336,6 +341,10 @@ export default function TradingDashboard() {
                   </Badge>
                 )}
               </TabsTrigger>
+              <TabsTrigger value="atlas" className="text-[11px] h-6 px-2 gap-1">
+                <Brain className="h-3 w-3" />
+                Atlas
+              </TabsTrigger>
             </TabsList>
           </div>
 
@@ -376,6 +385,20 @@ export default function TradingDashboard() {
                 onCloseOrder={(id, price, reason) => closePaperOrder(id, { exit_price: price, exit_reason: reason })}
                 onDeleteOrder={deletePaperOrder}
                 isLoading={isPaperLoading}
+              />
+            </TabsContent>
+
+            {/* Atlas panel MUST stay mounted for timers to work - forceMount keeps hooks running */}
+            <TabsContent value="atlas" forceMount className="h-full m-0 data-[state=inactive]:hidden">
+              <AtlasPanel
+                symbol={selectedSymbol}
+                enabled={true}
+                onEntryApproved={(candidateId) => {
+                  toast.success(`Entry approved: ${candidateId.slice(0, 8)}...`);
+                }}
+                onActionProposed={(tradeId, actionType) => {
+                  toast.info(`Action proposed: ${actionType} for ${tradeId.slice(0, 8)}...`);
+                }}
               />
             </TabsContent>
           </div>

@@ -1,14 +1,33 @@
-import { PageBody, PageHeader } from '@kit/ui/page';
+'use client';
 
-import { DashboardDemo } from '~/home/_components/dashboard-demo';
+import dynamic from 'next/dynamic';
+
+import { PageBody, PageHeader } from '@kit/ui/page';
+import { LoadingOverlay } from '@kit/ui/loading-overlay';
+
+// Dynamically import KPI Dashboard (client component with hooks)
+const KPIDashboard = dynamic(
+  () => import('./_components/kpi-dashboard').then((mod) => mod.KPIDashboard),
+  {
+    ssr: false,
+    loading: () => (
+      <LoadingOverlay>
+        <span className="text-muted-foreground">Loading KPIs...</span>
+      </LoadingOverlay>
+    ),
+  }
+);
 
 export default function HomePage() {
   return (
     <>
-      <PageHeader description={'Your SaaS at a glance'} />
+      <PageHeader
+        title="Trading Reports"
+        description="Real-time KPIs and performance metrics"
+      />
 
-      <PageBody>
-        <DashboardDemo />
+      <PageBody className="overflow-auto">
+        <KPIDashboard />
       </PageBody>
     </>
   );

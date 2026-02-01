@@ -18,13 +18,13 @@ import type {
   OptimizationResponse,
 } from './types';
 
-const DEFAULT_MODEL = 'gpt-4o';
+const DEFAULT_MODEL = 'gpt-4o-mini';
 const DEFAULT_MAX_TOKENS = 2000;
 const DEFAULT_TEMPERATURE = 0.7;
 
-// Cost per 1K tokens (approximate)
-const COST_PER_1K_INPUT = 0.01;
-const COST_PER_1K_OUTPUT = 0.03;
+// Cost per 1K tokens (GPT-4o-mini approximate)
+const COST_PER_1K_INPUT = 0.00015;
+const COST_PER_1K_OUTPUT = 0.0006;
 
 export class TradingAgents {
   private openai: OpenAI;
