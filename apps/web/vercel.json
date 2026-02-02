@@ -6,12 +6,9 @@
   "regions": ["iad1"],
   "functions": {
     "app/api/trading/agents/route.ts": {
-      "maxDuration": 50
+      "maxDuration": 300
     },
     "app/api/trading/market-data/route.ts": {
-      "maxDuration": 30
-    },
-    "app/api/trading/paper-orders/[id]/close/route.ts": {
       "maxDuration": 30
     }
   },
