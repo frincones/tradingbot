@@ -1189,7 +1189,6 @@ export async function POST(request: NextRequest) {
               mfe_usd: tm.risk_snapshot.mfe_usd || 0,
               mae_usd: tm.risk_snapshot.mae_usd || 0,
             };
-              .eq('user_id', user.id);
           } catch (reviewError) {
             console.warn(`[Atlas Trades] Failed to store review for trade ${tm.trade_id}:`, reviewError);
           }
