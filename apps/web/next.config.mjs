@@ -15,6 +15,10 @@ const INTERNAL_PACKAGES = [
 /** @type {import('next').NextConfig} */
 const config = {
   reactStrictMode: true,
+  /** Force new build ID to invalidate CDN cache */
+  generateBuildId: async () => {
+    return `build-${Date.now()}`;
+  },
   /** Enables hot reloading for local packages without a build step */
   transpilePackages: INTERNAL_PACKAGES,
   images: {

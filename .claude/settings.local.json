@@ -58,7 +58,15 @@
       "Bash(ping:*)",
       "Bash(pnpm tsc:*)",
       "Bash(pnpm --filter=web typecheck:*)",
-      "Bash(pnpm run lint)"
+      "Bash(pnpm run lint)",
+      "Bash(python3:*)",
+      "Bash(source .env.local)",
+      "Bash(pnpm run lint:*)",
+      "WebFetch(domain:testnet.binance.vision)",
+      "WebFetch(domain:developers.binance.com)",
+      "Bash(pnpm run build:*)",
+      "Bash(pnpm run type-check:*)",
+      "Bash(pnpm tsx:*)"
     ],
     "deny": [],
     "ask": []

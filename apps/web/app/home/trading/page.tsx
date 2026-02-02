@@ -4,17 +4,17 @@
  * Trading Workbench - Hyperliquid Style
  * Ultra-compact, dense layout optimized for professional trading
  * Zero friction, maximum data density
+ *
+ * @version 2.0.0 - Binance-only implementation
  */
 
 import { useState, useEffect, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@kit/ui/tabs';
 import { Badge } from '@kit/ui/badge';
-import { Activity, Wallet, TrendingUp, BarChart3, Wifi, WifiOff, Fish, Flame, BellRing, PlayCircle, Brain } from 'lucide-react';
+import { Activity, Wallet, TrendingUp, BarChart3, Wifi, WifiOff, Fish, Flame, BellRing, Brain } from 'lucide-react';
 import { useHyperliquidWS, type HLWSActiveAssetData } from '~/lib/hooks/use-hyperliquid-ws';
 import { useAlertCollector } from '~/lib/hooks/use-alert-collector';
-import { usePaperOrders } from '~/lib/hooks/use-paper-orders';
-import { usePaperOrderMonitor } from '~/lib/hooks/use-paper-order-monitor';
 import { toast } from 'sonner';
 import type { SentinelResponse, AgentAlert } from '@kit/trading-core';
 
@@ -81,11 +81,6 @@ const AlertsFeed = dynamic(
   { ssr: false, loading: () => <Skeleton className="h-full" /> }
 );
 
-const PaperOrdersList = dynamic(
-  () => import('./_components/paper-orders-list').then((mod) => mod.PaperOrdersList),
-  { ssr: false, loading: () => <Skeleton className="h-full" /> }
-);
-
 const AtlasPanel = dynamic(
   () => import('./_components/atlas-panel').then((mod) => mod.AtlasPanel),
   { ssr: false, loading: () => <Skeleton className="h-full" /> }
@@ -120,51 +115,72 @@ export default function TradingDashboard() {
   const [marketData, setMarketData] = useState<HLWSActiveAssetData | null>(null);
   const [newAlertCount, setNewAlertCount] = useState(0);
   const [currentPrices, setCurrentPrices] = useState<Record<string, number>>({});
-  const [paperOrderCount, setPaperOrderCount] = useState(0);
+  const [isExecutingOrder, setIsExecutingOrder] = useState(false);
 
-  // Paper orders hook
-  const {
-    orders: paperOrders,
-    openOrders,
-    stats: paperStats,
-    isLoading: isPaperLoading,
-    isCreating: _isPaperCreating,
-    createOrder: createPaperOrder,
-    closeOrder: closePaperOrder,
-    deleteOrder: deletePaperOrder,
-  } = usePaperOrders();
+  // ============================================================================
+  // EXECUTE APPROVED ENTRY
+  // ============================================================================
 
-  // Paper order monitor - auto-close on SL/TP
-  const { updatePrice } = usePaperOrderMonitor(openOrders, closePaperOrder, {
-    enabled: true,
-    onOrderClosed: (order, reason, exitPrice) => {
-      const pnl = order.realized_pnl || 0;
-      const isWin = pnl >= 0;
-      toast[isWin ? 'success' : 'error'](
-        `Paper trade closed: ${order.symbol} ${order.side} - ${reason.replace('_', ' ').toUpperCase()}`,
-        {
-          description: `P&L: ${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)} at $${exitPrice.toLocaleString()}`,
-        }
+  const executeApprovedEntry = useCallback(async (candidateId: string) => {
+    if (isExecutingOrder) {
+      console.log('[Trading] Already executing an order, skipping...');
+      return;
+    }
+
+    setIsExecutingOrder(true);
+    toast.loading('Executing order on Binance...', { id: 'execute-order' });
+
+    try {
+      console.log('[Trading] Executing approved entry:', candidateId);
+
+      const response = await fetch('/api/trading/execute-approved-entry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          candidateId,
+          symbol: selectedSymbol,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(error || 'Failed to execute order');
+      }
+
+      const result = await response.json();
+
+      console.log('[Trading] Order executed successfully:', result);
+
+      toast.success(
+        `Order executed! ${result.order.side} ${result.order.executedQty} ${result.order.symbol} @ $${result.order.avgPrice.toFixed(2)}`,
+        { id: 'execute-order', duration: 5000 }
       );
-    },
-  });
+    } catch (error) {
+      console.error('[Trading] Failed to execute order:', error);
+      toast.error(
+        `Failed to execute order: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { id: 'execute-order', duration: 5000 }
+      );
+    } finally {
+      setIsExecutingOrder(false);
+    }
+  }, [selectedSymbol, isExecutingOrder]);
 
-  // Update paper order count when orders change
-  useEffect(() => {
-    setPaperOrderCount(openOrders.length);
-  }, [openOrders.length]);
+  // ============================================================================
+  // MARKET DATA
+  // ============================================================================
 
   const handleActiveAssetData = useCallback((data: HLWSActiveAssetData) => {
     if (data.coin === selectedSymbol) {
       setMarketData(data);
     }
-    // Update current prices for paper order monitoring
+    // Update current prices
     if (data.markPx) {
       const price = parseFloat(data.markPx);
       setCurrentPrices((prev) => ({ ...prev, [data.coin]: price }));
-      updatePrice(data.coin, price);
     }
-  }, [selectedSymbol, updatePrice]);
+  }, [selectedSymbol]);
 
   const { isConnected, subscribeActiveAssetData, unsubscribeActiveAssetData } = useHyperliquidWS({
     autoConnect: true,
@@ -177,30 +193,6 @@ export default function TradingDashboard() {
     // Auto-clear badge after viewing
     setTimeout(() => setNewAlertCount((c) => Math.max(0, c - 1)), 30000);
   }, []);
-
-  // Handle simulate trade from alert
-  const handleSimulateTrade = useCallback(async (alert: AgentAlert) => {
-    if (!alert.execution_json) {
-      toast.error('No execution data available for this alert');
-      return;
-    }
-
-    try {
-      const order = await createPaperOrder({
-        alert_id: alert.id,
-        size_usd: 100, // Default $100 paper trade size
-      });
-
-      if (order) {
-        toast.success(`Paper trade opened: ${order.symbol} ${order.side}`, {
-          description: `Entry: $${order.entry_price.toLocaleString()} | Size: $${order.size_usd}`,
-        });
-      }
-    } catch (err) {
-      toast.error('Failed to create paper trade');
-      console.error('[Paper Trade] Error:', err);
-    }
-  }, [createPaperOrder]);
 
   const {
     isAnalyzing: _isAnalyzing,
@@ -332,15 +324,6 @@ export default function TradingDashboard() {
                   </Badge>
                 )}
               </TabsTrigger>
-              <TabsTrigger value="paper" className="text-[11px] h-6 px-2 gap-1">
-                <PlayCircle className="h-3 w-3" />
-                Paper
-                {paperOrderCount > 0 && (
-                  <Badge variant="secondary" className="text-[8px] px-1 py-0 h-3 ml-1">
-                    {paperOrderCount}
-                  </Badge>
-                )}
-              </TabsTrigger>
               <TabsTrigger value="atlas" className="text-[11px] h-6 px-2 gap-1">
                 <Brain className="h-3 w-3" />
                 Atlas
@@ -374,18 +357,7 @@ export default function TradingDashboard() {
             </TabsContent>
 
             <TabsContent value="alerts" className="h-full m-0">
-              <AlertsFeed onSimulateTrade={handleSimulateTrade} />
-            </TabsContent>
-
-            <TabsContent value="paper" className="h-full m-0">
-              <PaperOrdersList
-                orders={paperOrders}
-                stats={paperStats}
-                currentPrices={currentPrices}
-                onCloseOrder={(id, price, reason) => closePaperOrder(id, { exit_price: price, exit_reason: reason })}
-                onDeleteOrder={deletePaperOrder}
-                isLoading={isPaperLoading}
-              />
+              <AlertsFeed />
             </TabsContent>
 
             {/* Atlas panel MUST stay mounted for timers to work - forceMount keeps hooks running */}
@@ -394,7 +366,9 @@ export default function TradingDashboard() {
                 symbol={selectedSymbol}
                 enabled={true}
                 onEntryApproved={(candidateId) => {
-                  toast.success(`Entry approved: ${candidateId.slice(0, 8)}...`);
+                  console.log('[Trading] Entry approved, executing order:', candidateId);
+                  toast.success(`Entry approved! Executing order...`);
+                  executeApprovedEntry(candidateId);
                 }}
                 onActionProposed={(tradeId, actionType) => {
                   toast.info(`Action proposed: ${actionType} for ${tradeId.slice(0, 8)}...`);
