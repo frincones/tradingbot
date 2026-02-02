@@ -5,7 +5,9 @@
 
 // Vercel Serverless Function Configuration
 // Required for OpenAI API calls which can take 5-15 seconds
-export const maxDuration = 50; // seconds (Pro plan allows up to 60s)
+// NOTE: Hobby plan maxes out at 10s, Pro plan allows up to 60s
+// Some complex analyses may timeout on Hobby plan - consider upgrading to Pro
+export const maxDuration = 50; // seconds (requires Pro plan for >10s)
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseServerClient } from '@kit/supabase/server-client';
