@@ -113,6 +113,61 @@ export default function TradingDashboard() {
   const [marketData, setMarketData] = useState<HLWSActiveAssetData | null>(null);
   const [newAlertCount, setNewAlertCount] = useState(0);
   const [currentPrices, setCurrentPrices] = useState<Record<string, number>>({});
+  const [isExecutingOrder, setIsExecutingOrder] = useState(false);
+
+  // ============================================================================
+  // EXECUTE APPROVED ENTRY
+  // ============================================================================
+
+  const executeApprovedEntry = useCallback(async (candidateId: string) => {
+    if (isExecutingOrder) {
+      console.log('[Trading] Already executing an order, skipping...');
+      return;
+    }
+
+    setIsExecutingOrder(true);
+    toast.loading('Executing order on Binance...', { id: 'execute-order' });
+
+    try {
+      console.log('[Trading] Executing approved entry:', candidateId);
+
+      const response = await fetch('/api/trading/execute-approved-entry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          candidateId,
+          symbol: selectedSymbol,
+        }),
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(error || 'Failed to execute order');
+      }
+
+      const result = await response.json();
+
+      console.log('[Trading] Order executed successfully:', result);
+
+      toast.success(
+        `Order executed! ${result.order.side} ${result.order.executedQty} ${result.order.symbol} @ $${result.order.avgPrice.toFixed(2)}`,
+        { id: 'execute-order', duration: 5000 }
+      );
+    } catch (error) {
+      console.error('[Trading] Failed to execute order:', error);
+      toast.error(
+        `Failed to execute order: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { id: 'execute-order', duration: 5000 }
+      );
+    } finally {
+      setIsExecutingOrder(false);
+    }
+  }, [selectedSymbol, isExecutingOrder]);
+
+  // ============================================================================
+  // MARKET DATA
+  // ============================================================================
 
   const handleActiveAssetData = useCallback((data: HLWSActiveAssetData) => {
     if (data.coin === selectedSymbol) {
@@ -309,7 +364,9 @@ export default function TradingDashboard() {
                 symbol={selectedSymbol}
                 enabled={true}
                 onEntryApproved={(candidateId) => {
-                  toast.success(`Entry approved: ${candidateId.slice(0, 8)}...`);
+                  console.log('[Trading] Entry approved, executing order:', candidateId);
+                  toast.success(`Entry approved! Executing order...`);
+                  executeApprovedEntry(candidateId);
                 }}
                 onActionProposed={(tradeId, actionType) => {
                   toast.info(`Action proposed: ${actionType} for ${tradeId.slice(0, 8)}...`);
