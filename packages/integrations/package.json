@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./hyperliquid": "./src/hyperliquid/index.ts",
     "./alpaca": "./src/alpaca/index.ts",
+    "./binance": "./src/binance/index.ts",
     "./openai": "./src/openai/index.ts"
   },
   "scripts": {
