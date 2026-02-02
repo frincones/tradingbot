@@ -3,6 +3,8 @@
 /**
  * Atlas Panel - AI Trade Manager dashboard
  * Shows Entry Gatekeeping and Trade Management status and recent decisions
+ *
+ * @version 2.0.0 - Binance-only orders
  */
 
 import { useState } from 'react';

@@ -4,6 +4,8 @@
  * Trading Workbench - Hyperliquid Style
  * Ultra-compact, dense layout optimized for professional trading
  * Zero friction, maximum data density
+ *
+ * @version 2.0.0 - Binance-only implementation
  */
 
 import { useState, useEffect, useCallback } from 'react';
