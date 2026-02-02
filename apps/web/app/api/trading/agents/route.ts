@@ -180,7 +180,7 @@ async function checkAlertCooldown(
 }
 
 /**
- * Check if there are open paper orders in conflicting direction
+ * Check if there are open Binance orders in conflicting direction
  */
 async function checkConflictingPositions(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -193,17 +193,31 @@ async function checkConflictingPositions(
     return { isValid: true };
   }
 
-  const { data: openOrders } = await client
-    .from('paper_orders')
-    .select('id, side, entry_price')
+  // Check real Binance orders via strategy ownership
+  const { data: strategies } = await client
+    .from('strategies')
+    .select('id')
     .eq('user_id', userId)
-    .eq('symbol', symbol)
-    .eq('status', 'open');
+    .eq('symbol', `${symbol}USDT`);
+
+  if (!strategies || strategies.length === 0) {
+    return { isValid: true };
+  }
+
+  const strategyIds = strategies.map((s: { id: string }) => s.id);
+
+  const { data: openOrders } = await client
+    .from('orders')
+    .select('id, side')
+    .eq('broker', 'binance')
+    .in('strategy_id', strategyIds)
+    .in('status', ['new', 'partially_filled']);
 
   if (openOrders && openOrders.length > 0) {
-    const orders = openOrders as Array<{ id: string; side: string; entry_price: number }>;
+    const orders = openOrders as Array<{ id: string; side: string }>;
+    const oppositeSide = proposedSetup === 'LONG' ? 'SELL' : 'BUY';
     const hasConflicting = orders.some(
-      (order) => order.side !== proposedSetup
+      (order) => order.side.toUpperCase() === oppositeSide
     );
 
     if (hasConflicting) {
@@ -875,10 +889,11 @@ export async function POST(request: NextRequest) {
 
         atlasToolHandlers.set('get_order_status', async (args) => {
           const orderId = String(args.order_id || '');
-          const { data: order } = await client
-            .from('paper_orders')
+          const { data: order} = await client
+            .from('orders')
             .select('*')
             .eq('id', orderId)
+            .eq('broker', 'binance')
             .single();
           return order || { error: 'Order not found' };
         });
@@ -886,10 +901,11 @@ export async function POST(request: NextRequest) {
         atlasToolHandlers.set('get_position_details', async (args) => {
           const tradeId = String(args.trade_id || '');
           const { data: position } = await client
-            .from('paper_orders')
+            .from('orders')
             .select('*')
             .eq('id', tradeId)
-            .eq('status', 'open')
+            .eq('broker', 'binance')
+            .in('status', ['new', 'partially_filled'])
             .single();
           return position || { error: 'Position not found' };
         });
@@ -1037,10 +1053,11 @@ export async function POST(request: NextRequest) {
 
         atlasToolHandlers.set('get_order_status', async (args) => {
           const orderId = String(args.order_id || '');
-          const { data: order } = await client
-            .from('paper_orders')
+          const { data: order} = await client
+            .from('orders')
             .select('*')
             .eq('id', orderId)
+            .eq('broker', 'binance')
             .single();
           return order || { error: 'Order not found' };
         });
@@ -1048,10 +1065,11 @@ export async function POST(request: NextRequest) {
         atlasToolHandlers.set('get_position_details', async (args) => {
           const tradeId = String(args.trade_id || '');
           const { data: position } = await client
-            .from('paper_orders')
+            .from('orders')
             .select('*')
             .eq('id', tradeId)
-            .eq('status', 'open')
+            .eq('broker', 'binance')
+            .in('status', ['new', 'partially_filled'])
             .single();
           return position || { error: 'Position not found' };
         });
@@ -1160,17 +1178,17 @@ export async function POST(request: NextRequest) {
               }
             }
 
-            // Update paper_order with review info
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            await (client as any)
-              .from('paper_orders')
-              .update({
-                last_review_ts: new Date().toISOString(),
-                review_count: (tradeBundle.open_trades.find(t => t.trade_id === tm.trade_id)?.review_count ?? 0) + 1,
-                mfe_usd: tm.risk_snapshot.mfe_usd || 0,
-                mae_usd: tm.risk_snapshot.mae_usd || 0,
-              })
-              .eq('id', tm.trade_id)
+            // TODO: Update order with review info
+            // Note: orders table doesn't have last_review_ts, review_count, mfe_usd, mae_usd yet
+            // Need to add these columns or store in a separate trade_tracking table
+            // For now, skip this update to avoid errors
+            // eslint-disable-next-line @typescript-eslint/no-unused-vars
+            const _reviewUpdate = {
+              last_review_ts: new Date().toISOString(),
+              review_count: (tradeBundle.open_trades.find(t => t.trade_id === tm.trade_id)?.review_count ?? 0) + 1,
+              mfe_usd: tm.risk_snapshot.mfe_usd || 0,
+              mae_usd: tm.risk_snapshot.mae_usd || 0,
+            };
               .eq('user_id', user.id);
           } catch (reviewError) {
             console.warn(`[Atlas Trades] Failed to store review for trade ${tm.trade_id}:`, reviewError);
