@@ -22,6 +22,7 @@ export class BinanceClient {
   private apiKey: string;
   private secretKey: string;
   private baseUrl: string;
+  private timeOffset: number = 0; // Offset to compensate for time difference
 
   constructor(config: BinanceConfig) {
     this.apiKey = config.apiKey;
@@ -45,7 +46,8 @@ export class BinanceClient {
     params: Record<string, unknown> = {},
     signed = false
   ): Promise<T> {
-    const timestamp = Date.now();
+    // Subtract 1000ms from timestamp to avoid "ahead of server time" errors
+    const timestamp = Date.now() - 1000 - this.timeOffset;
     const queryParams: Record<string, string> = {};
 
     // Convert all params to strings
