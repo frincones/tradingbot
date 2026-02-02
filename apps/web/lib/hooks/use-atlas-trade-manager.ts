@@ -102,8 +102,7 @@ export function useAtlasTradeManager(options: UseAtlasTradeManagerOptions) {
       .from('orders')
       .select('*')
       .eq('symbol', `${symbol}USDT`) // Binance uses BTCUSDT format
-      .eq('broker', 'binance')
-      .in('status', ['new', 'partially_filled']) // Open statuses
+      .in('status', ['pending', 'submitted', 'accepted', 'partially_filled']) // Open statuses
       .order('created_at', { ascending: false });
 
     if (error) {
