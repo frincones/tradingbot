@@ -25,7 +25,7 @@ ALTER TABLE public.orders
 
 -- 4. CREATE INDICES FOR BINANCE ORDERS
 CREATE INDEX IF NOT EXISTS idx_orders_broker
-  ON public.orders(broker, user_id, status);
+  ON public.orders(broker, strategy_id, status);
 
 CREATE INDEX IF NOT EXISTS idx_orders_binance_id
   ON public.orders(binance_order_id)
