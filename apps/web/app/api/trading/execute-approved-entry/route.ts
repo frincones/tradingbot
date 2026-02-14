@@ -100,24 +100,66 @@ export async function POST(request: NextRequest) {
     });
 
     // ============================================================================
-    // 3. EXECUTE BINANCE ORDER
+    // 3. EXECUTE ORDER (Binance or Paper Trading fallback)
     // ============================================================================
 
-    console.log('[Execute Entry] Calling executeTradeOnBinance...');
+    let orderResult: {
+      entryOrder: { orderId: number; clientOrderId: string; status: string; executedQty: string; cummulativeQuoteQty: string };
+    };
+    let isPaper = false;
 
-    const orderResult = await executeTradeOnBinance({
-      symbol: `${symbol}/USDT`,
-      side: side as 'BUY' | 'SELL',
-      sizeUsd,
-      stopLoss: stopLoss > 0 ? stopLoss : undefined,
-      takeProfit: takeProfit > 0 ? takeProfit : undefined,
-    });
+    // Try real Binance execution first
+    try {
+      console.log('[Execute Entry] Calling executeTradeOnBinance...');
 
-    console.log('[Execute Entry] Binance order executed:', {
-      orderId: orderResult.entryOrder.orderId,
-      status: orderResult.entryOrder.status,
-      executedQty: orderResult.entryOrder.executedQty,
-    });
+      const binanceResult = await executeTradeOnBinance({
+        symbol: `${symbol}/USDT`,
+        side: side as 'BUY' | 'SELL',
+        sizeUsd,
+        stopLoss: stopLoss > 0 ? stopLoss : undefined,
+        takeProfit: takeProfit > 0 ? takeProfit : undefined,
+      });
+
+      orderResult = binanceResult;
+      console.log('[Execute Entry] Binance order executed:', {
+        orderId: binanceResult.entryOrder.orderId,
+        status: binanceResult.entryOrder.status,
+        executedQty: binanceResult.entryOrder.executedQty,
+      });
+    } catch (binanceError) {
+      const errorMsg = binanceError instanceof Error ? binanceError.message : String(binanceError);
+      const isGeoRestricted = errorMsg.includes('restricted location') || errorMsg.includes('Service unavailable');
+
+      if (!isGeoRestricted) {
+        throw binanceError; // Re-throw non-geo errors
+      }
+
+      // Fallback: Paper trading simulation
+      console.warn('[Execute Entry] Binance geo-restricted, using paper trading fallback');
+      isPaper = true;
+
+      // Use the alert's ideal entry price or fetch current price
+      const currentPrice = idealEntry > 0 ? idealEntry : 69900; // fallback
+      const simulatedQty = sizeUsd / currentPrice;
+      const simulatedQuoteQty = sizeUsd;
+
+      orderResult = {
+        entryOrder: {
+          orderId: Date.now(),
+          clientOrderId: `paper-${candidateId.slice(0, 8)}-${Date.now()}`,
+          status: 'FILLED',
+          executedQty: simulatedQty.toFixed(8),
+          cummulativeQuoteQty: simulatedQuoteQty.toFixed(2),
+        },
+      };
+
+      console.log('[Execute Entry] Paper order simulated:', {
+        orderId: orderResult.entryOrder.orderId,
+        price: currentPrice,
+        qty: orderResult.entryOrder.executedQty,
+        quoteQty: orderResult.entryOrder.cummulativeQuoteQty,
+      });
+    }
 
     // ============================================================================
     // 4. GET OR CREATE STRATEGY
@@ -193,7 +235,7 @@ export async function POST(request: NextRequest) {
         stop_price: stopLoss > 0 ? stopLoss : null,
         filled_at: filledQty > 0 ? new Date().toISOString() : null,
         alert_id: candidateId,
-        is_paper: false,
+        is_paper: isPaper,
       })
       .select('id')
       .single();
@@ -217,7 +259,7 @@ export async function POST(request: NextRequest) {
       .update({
         status: 'actioned' as const,
         actioned_at: new Date().toISOString(),
-        action_taken: 'executed',
+        action_taken: isPaper ? 'paper_executed' : 'executed',
       })
       .eq('id', candidateId);
 
@@ -231,6 +273,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
+      isPaper,
       order: {
         id: savedOrder.id,
         binanceOrderId: orderResult.entryOrder.orderId,
