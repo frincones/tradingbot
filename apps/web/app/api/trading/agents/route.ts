@@ -788,10 +788,37 @@ export async function POST(request: NextRequest) {
             continue;
           }
 
-          // Prepare alert data
+          // Merge alert-level data with top-level fallbacks from V2 response
+          // The LLM may place pattern/thesis/execution at the alert level OR at the top level
+          const effectivePattern = alert.pattern || sentinelResultV2.response.pattern || undefined;
+          const effectiveThesis = alert.thesis || sentinelResultV2.response.thesis || undefined;
+          const effectiveExecution = alert.execution_candidate || sentinelResultV2.response.execution_candidate || undefined;
+
+          // Determine setup from pattern — must be LONG or SHORT for TRADE_ALERTs
+          const patternSetup = effectivePattern?.setup;
           const alertSetup: 'LONG' | 'SHORT' | 'NONE' =
-            alert.pattern?.setup === 'LONG_SETUP' ? 'LONG' :
-            alert.pattern?.setup === 'SHORT_SETUP' ? 'SHORT' : 'NONE';
+            patternSetup === 'LONG_SETUP' ? 'LONG' :
+            patternSetup === 'SHORT_SETUP' ? 'SHORT' : 'NONE';
+
+          // Skip TRADE_ALERTs without valid setup or execution data
+          if (alert.type === 'TRADE_ALERT') {
+            if (alertSetup === 'NONE') {
+              storedAlerts.push({
+                type: alert.type,
+                action: 'skipped: no valid setup (LONG/SHORT) in pattern',
+              });
+              console.warn(`[Sentinel V2] ⚠️ TRADE_ALERT skipped: pattern.setup is ${patternSetup || 'undefined'}`);
+              continue;
+            }
+            if (!effectiveExecution?.entry_zone?.min && !effectiveExecution?.entry_zone?.max) {
+              storedAlerts.push({
+                type: alert.type,
+                action: 'skipped: no valid entry_zone in execution_candidate',
+              });
+              console.warn(`[Sentinel V2] ⚠️ TRADE_ALERT skipped: no entry_zone data`);
+              continue;
+            }
+          }
 
           const alertData = {
             user_id: user.id,
@@ -804,9 +831,9 @@ export async function POST(request: NextRequest) {
             risk_type: alert.risk_type || null,
             risk_level: alert.risk_level || null,
             timeframe: alert.timeframe,
-            pattern_json: (alert.pattern || {}) as unknown as Json,
-            thesis_json: (alert.thesis || {}) as unknown as Json,
-            execution_json: alert.execution_candidate as unknown as Json || null,
+            pattern_json: (effectivePattern || {}) as unknown as Json,
+            thesis_json: (effectiveThesis || {}) as unknown as Json,
+            execution_json: effectiveExecution as unknown as Json || null,
             confidence: alert.confidence,
             risk_confidence: sentinelResultV2.response.risk_confidence,
             setup_confidence: sentinelResultV2.response.setup_confidence,

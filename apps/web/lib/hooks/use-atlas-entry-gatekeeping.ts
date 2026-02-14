@@ -95,6 +95,7 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
   const fetchPendingAlerts = useCallback(async (): Promise<AtlasAlertCandidate[]> => {
     const supabase = getSupabaseBrowserClient();
 
+    // Only fetch TRADE_ALERTs (not RISK_ALERTs) since those are the ones with execution data
     const { data: alerts, error } = await supabase
       .from('agent_alerts')
       .select('*')
@@ -117,30 +118,79 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
     console.log('[Atlas Entry] Found', alerts.length, 'pending alerts');
 
     // Convert alerts to AtlasAlertCandidate format
-    return alerts.map((alert) => {
-      const pattern = alert.pattern_json as Record<string, unknown>;
-      const thesis = alert.thesis_json as Record<string, unknown>;
+    // Handle both V1 and V2 alert structures
+    const candidates: AtlasAlertCandidate[] = [];
+
+    for (const alert of alerts) {
+      const pattern = alert.pattern_json as Record<string, unknown> | null;
+      const thesis = alert.thesis_json as Record<string, unknown> | null;
       const execution = alert.execution_json as Record<string, unknown> | null;
 
-      return {
+      // Determine setup — skip alerts without valid setup
+      const setup = alert.setup as string;
+      if (setup !== 'LONG' && setup !== 'SHORT') {
+        console.warn('[Atlas Entry] Skipping alert without valid setup:', alert.id, 'setup:', setup);
+        continue;
+      }
+
+      // Extract entry zone with flexible nesting
+      const entryZone = execution?.entry_zone as { min?: number; max?: number; ideal?: number } | undefined;
+      const entryMin = entryZone?.min || 0;
+      const entryMax = entryZone?.max || 0;
+      const entryIdeal = entryZone?.ideal || ((entryMin + entryMax) / 2) || 0;
+
+      // Extract stop loss (can be number or {price: number})
+      const rawSl = execution?.stop_loss;
+      const stopLoss = typeof rawSl === 'object' && rawSl !== null
+        ? (rawSl as { price?: number }).price || 0
+        : typeof rawSl === 'number' ? rawSl : 0;
+
+      // Extract take profit (can be number or first target)
+      const rawTp = execution?.take_profit;
+      const tpTargets = execution?.take_profit_targets as Array<{ price?: number }> | undefined;
+      const takeProfit = typeof rawTp === 'number'
+        ? rawTp
+        : tpTargets?.[0]?.price || 0;
+
+      // Extract thesis summary from various possible locations
+      const thesisSummary = (thesis?.summary as string)
+        || (thesis?.title as string)
+        || (thesis?.reasoning as string)?.substring(0, 200)
+        || '';
+
+      // Extract pattern type
+      const patternType = (pattern?.type as string) || 'UNKNOWN';
+
+      // Log what we're sending to Atlas
+      console.log('[Atlas Entry] Candidate:', {
+        id: alert.id.slice(0, 8),
+        setup,
+        patternType,
+        confidence: alert.confidence,
+        entryZone: `$${entryMin}-$${entryMax}`,
+        sl: stopLoss,
+        tp: takeProfit,
+      });
+
+      candidates.push({
         candidate_id: alert.id,
         symbol: alert.symbol,
-        setup: alert.setup as 'LONG' | 'SHORT',
-        pattern_type: (pattern?.type as string) || 'UNKNOWN',
+        setup: setup as 'LONG' | 'SHORT',
+        pattern_type: patternType,
         confidence: Number(alert.confidence) || 0,
         entry_zone: {
-          min: (execution?.entry_zone as { min?: number })?.min || 0,
-          max: (execution?.entry_zone as { max?: number })?.max || 0,
-          ideal: (execution?.entry_zone as { ideal?: number })?.ideal || 0,
+          min: entryMin,
+          max: entryMax,
+          ideal: entryIdeal,
         },
-        stop_loss: typeof execution?.stop_loss === 'object'
-          ? (execution.stop_loss as { price?: number }).price || 0
-          : (execution?.stop_loss as number) || 0,
-        take_profit: (execution?.take_profit as number) || 0,
-        thesis_summary: (thesis?.summary as string) || (thesis?.title as string) || '',
+        stop_loss: stopLoss,
+        take_profit: takeProfit,
+        thesis_summary: thesisSummary,
         risk_notes: (alert.risk_notes as string[]) || [],
-      };
-    });
+      });
+    }
+
+    return candidates;
   }, [symbol]);
 
   // ============================================================================
@@ -157,20 +207,34 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
 
       if (!asset) return null;
 
-      const markPrice = parseFloat(asset.markPx || '0');
-      const _oraclePrice = parseFloat(asset.oraclePx || asset.markPx || '0');
+      // REST API returns ParsedAssetCtx format (markPrice as number)
+      // Also handle WS format (markPx as string) for robustness
+      const markPrice = typeof asset.markPrice === 'number'
+        ? asset.markPrice
+        : parseFloat(asset.markPx || '0');
+      const fundingRate = typeof asset.funding === 'number'
+        ? asset.funding
+        : parseFloat(asset.funding || '0');
+      const openInterest = typeof asset.openInterest === 'number'
+        ? asset.openInterest
+        : parseFloat(asset.openInterest || '0');
+
+      if (markPrice <= 0) {
+        console.warn('[Atlas Entry] Invalid mark price:', markPrice);
+        return null;
+      }
 
       return {
         hl_mid: markPrice,
         hl_bid: markPrice * 0.9999,
         hl_ask: markPrice * 1.0001,
-        alpaca_mid: null, // Not available in this context
+        alpaca_mid: null,
         alpaca_bid: null,
         alpaca_ask: null,
         drift_usd: 0,
         alpaca_spread_usd: null,
-        funding_rate: parseFloat(asset.funding || '0'),
-        open_interest: parseFloat(asset.openInterest || '0'),
+        funding_rate: fundingRate,
+        open_interest: openInterest,
         timestamp: Date.now(),
       };
     } catch (error) {
@@ -225,11 +289,67 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
   // BUILD BUNDLE
   // ============================================================================
 
+  // ============================================================================
+  // FETCH INDICATORS FROM ALERTS CONTEXT
+  // ============================================================================
+
+  const fetchIndicatorsFromAlerts = useCallback(async (): Promise<Partial<AtlasIndicatorsInternal>> => {
+    try {
+      const supabase = getSupabaseBrowserClient();
+
+      // Get recent alerts to extract real indicators from pattern_json
+      // Note: timeframe_context may exist in DB but not in TS types, so we use select('*')
+      const { data: recentAlerts } = await supabase
+        .from('agent_alerts')
+        .select('*')
+        .eq('symbol', symbol)
+        .eq('decision', 'ALERT')
+        .order('created_at', { ascending: false })
+        .limit(5);
+
+      if (!recentAlerts || recentAlerts.length === 0) return {};
+
+      // Extract indicators from the most recent alert
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const latest = recentAlerts[0] as any;
+
+      // Try to get timeframe_context (V2 column, may not be in TS types)
+      const tfCtx = latest?.timeframe_context as Record<string, Record<string, number>> | null | undefined;
+      const tf1h = tfCtx?.tf_1h || {};
+      const tf10m = tfCtx?.tf_10m || {};
+
+      // Extract pattern scores from pattern_json
+      const pattern = latest?.pattern_json as Record<string, unknown> | null;
+      const flushScore = typeof pattern?.flush_score === 'number' ? pattern.flush_score : (tf10m.flush_count || 0) * 30;
+      const burstScore = typeof pattern?.burst_score === 'number' ? pattern.burst_score : (tf10m.burst_count || 0) * 30;
+      const absorptionScore = typeof pattern?.absorption_score === 'number' ? pattern.absorption_score : (tf10m.absorption_count || 0) * 25;
+
+      const whaleNetFlow = tf1h.whale_net_flow_usd || tf10m.whale_net_flow_usd || 0;
+
+      return {
+        flush_score: flushScore,
+        burst_score: burstScore,
+        absorption_score: absorptionScore,
+        whale_net_flow_usd: whaleNetFlow,
+        whale_dominant_direction: whaleNetFlow > 50000 ? 'buying' : whaleNetFlow < -50000 ? 'selling' : 'neutral',
+        reclaim_flag: Boolean(pattern?.confirmations && (pattern.confirmations as Record<string, boolean>).reclaim_confirmed),
+        atr_5m: tf1h.volatility_atr || null,
+      };
+    } catch {
+      return {};
+    }
+  }, [symbol]);
+
+  // ============================================================================
+  // BUILD BUNDLE
+  // ============================================================================
+
   const buildBundle = useCallback(async (): Promise<AtlasEntryBundle | null> => {
-    const [candidates, marketData, portfolioState] = await Promise.all([
+    const [candidates, marketData, portfolioState, alertIndicators] = await Promise.all([
       fetchPendingAlerts(),
       fetchMarketData(),
       fetchPortfolioState(),
+      fetchIndicatorsFromAlerts(),
     ]);
 
     if (!marketData) {
@@ -242,22 +362,30 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
       return null;
     }
 
-    // Build indicators (simplified for now)
+    // Build indicators enriched with real data from alerts and market context
     const indicators: AtlasIndicatorsInternal = {
-      flush_score: 0,
-      burst_score: 0,
-      reclaim_flag: false,
-      absorption_score: 0,
-      whale_net_flow_usd: 0,
-      whale_dominant_direction: 'neutral',
+      flush_score: alertIndicators.flush_score ?? 0,
+      burst_score: alertIndicators.burst_score ?? 0,
+      reclaim_flag: alertIndicators.reclaim_flag ?? false,
+      absorption_score: alertIndicators.absorption_score ?? 0,
+      whale_net_flow_usd: alertIndicators.whale_net_flow_usd ?? 0,
+      whale_dominant_direction: alertIndicators.whale_dominant_direction ?? 'neutral',
       support_levels: [],
       resistance_levels: [],
       atr_1m: null,
-      atr_5m: null,
+      atr_5m: alertIndicators.atr_5m ?? null,
       chop_index: null,
-      data_freshness_ms: 0,
+      data_freshness_ms: Date.now() - marketData.timestamp,
       ws_connected: true,
     };
+
+    console.log('[Atlas Entry] Indicators enriched:', {
+      flush: indicators.flush_score,
+      burst: indicators.burst_score,
+      whale: indicators.whale_net_flow_usd,
+      direction: indicators.whale_dominant_direction,
+      reclaim: indicators.reclaim_flag,
+    });
 
     // Default guardrails
     const guardrails: AtlasGuardrails = {
@@ -277,7 +405,7 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
       alert_candidates: candidates,
       guardrails,
     };
-  }, [fetchPendingAlerts, fetchMarketData, fetchPortfolioState]);
+  }, [fetchPendingAlerts, fetchMarketData, fetchPortfolioState, fetchIndicatorsFromAlerts]);
 
   // ============================================================================
   // TRIGGER ANALYSIS
