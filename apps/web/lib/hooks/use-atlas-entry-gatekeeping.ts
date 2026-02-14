@@ -126,10 +126,15 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
       const thesis = alert.thesis_json as Record<string, unknown> | null;
       const execution = alert.execution_json as Record<string, unknown> | null;
 
-      // Determine setup — skip alerts without valid setup
+      // Determine setup — dismiss alerts without valid setup so they don't persist
       const setup = alert.setup as string;
       if (setup !== 'LONG' && setup !== 'SHORT') {
-        console.warn('[Atlas Entry] Skipping alert without valid setup:', alert.id, 'setup:', setup);
+        console.warn('[Atlas Entry] Dismissing alert without valid setup:', alert.id, 'setup:', setup);
+        // Auto-dismiss invalid alerts to prevent re-processing
+        await supabase
+          .from('agent_alerts')
+          .update({ status: 'dismissed' as const, action_taken: 'invalid_setup' })
+          .eq('id', alert.id);
         continue;
       }
 

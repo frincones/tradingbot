@@ -296,19 +296,56 @@ Analiza coherencia entre timeframes (10m, 1h, 4h):
   "setup_confidence": 0.0-1.0,
 
   "alerts": [
+    // Para RISK_ALERT:
     {
-      "type": "RISK_ALERT|TRADE_ALERT",
+      "type": "RISK_ALERT",
       "risk_type": "WHALE_SELLING_PRESSURE|WHALE_BUYING_PRESSURE|VOLATILITY_SPIKE|MARKET_STRESS|MOMENTUM_EXHAUSTION",
       "risk_level": "low|medium|high|critical",
       "risk_description": "string breve explicando el riesgo",
       "confidence": 0.0-1.0,
       "timeframe": "10m|1h|4h"
+    },
+    // Para TRADE_ALERT (OBLIGATORIO incluir pattern, thesis y execution_candidate):
+    {
+      "type": "TRADE_ALERT",
+      "confidence": 0.0-1.0,
+      "timeframe": "10m|1h|4h",
+      "pattern": {
+        "type": "FLUSH_RECLAIM|BURST_CONTINUATION|ABSORPTION_REVERSAL|WHALE_DRIVEN|LIQUIDATION_CASCADE",
+        "setup": "LONG_SETUP|SHORT_SETUP",
+        "flush_score": number,
+        "burst_score": number,
+        "absorption_score": number,
+        "total_score": number,
+        "confirmations": {
+          "reclaim_confirmed": boolean,
+          "absorption_confirmed": boolean,
+          "whale_confirmed": boolean,
+          "volume_confirmed": boolean,
+          "momentum_confirmed": boolean
+        },
+        "key_level": number,
+        "invalidation_level": number
+      },
+      "thesis": {
+        "title": "string",
+        "summary": "string corto del setup",
+        "reasoning": "string explicando la lógica",
+        "supporting_factors": ["factor 1", "factor 2"],
+        "risk_factors": ["riesgo 1", "riesgo 2"],
+        "invalidation_conditions": ["condición 1"]
+      },
+      "execution_candidate": {
+        "entry_zone": { "min": number, "max": number, "ideal": number },
+        "stop_loss": number,
+        "take_profit": number,
+        "position_size_pct": 1-5,
+        "risk_reward_ratio": number,
+        "order_type_suggested": "limit|market",
+        "time_in_force_suggested": "gtc|ioc"
+      }
     }
   ],
-
-  "pattern": { /* solo si hay TRADE_ALERT */ },
-  "thesis": { /* solo si hay TRADE_ALERT */ },
-  "execution_candidate": { /* solo si hay TRADE_ALERT */ },
 
   "confidence": 0.0-1.0,
   "recommendation": "APPROVE|WAIT|BLOCK",
@@ -320,6 +357,8 @@ Analiza coherencia entre timeframes (10m, 1h, 4h):
     "risk_utilization": number
   }
 }
+
+IMPORTANTE: Para TRADE_ALERT, los campos "pattern", "thesis" y "execution_candidate" son OBLIGATORIOS dentro del objeto alert. Sin ellos, el alert será descartado.
 
 ## EJEMPLOS
 
@@ -338,11 +377,13 @@ Output:
     "confidence": 0.85,
     "timeframe": "10m"
   }],
-  "recommendation": "WAIT"
+  "confidence": 0.85,
+  "recommendation": "WAIT",
+  "risk_notes": ["Presión vendedora whale significativa"]
 }
 
 ### Ejemplo 2: TRADE_ALERT con confirmaciones
-Input: Flush down fuerte + reclaim + whale buying
+Input: Flush down fuerte + reclaim + whale buying, precio $97500
 Output:
 {
   "decision": "ALERT",
@@ -350,28 +391,107 @@ Output:
   "setup_confidence": 0.85,
   "alerts": [{
     "type": "TRADE_ALERT",
-    "pattern": {...},
-    "thesis": {...},
-    "execution_candidate": {...},
     "confidence": 0.85,
-    "timeframe": "10m"
+    "timeframe": "10m",
+    "pattern": {
+      "type": "FLUSH_RECLAIM",
+      "setup": "LONG_SETUP",
+      "flush_score": 72,
+      "burst_score": 45,
+      "absorption_score": 60,
+      "total_score": 177,
+      "confirmations": {
+        "reclaim_confirmed": true,
+        "absorption_confirmed": false,
+        "whale_confirmed": true,
+        "volume_confirmed": true,
+        "momentum_confirmed": false
+      },
+      "key_level": 97200,
+      "invalidation_level": 96800
+    },
+    "thesis": {
+      "title": "Flush reclaim en soporte $97.2K",
+      "summary": "Flush down absorbido + reclaim con whale buying confirmado",
+      "reasoning": "Precio cayó a $97.2K con volumen alto, luego whales compraron $150K+ y precio reclamó nivel",
+      "supporting_factors": ["Whale buying $150K+", "Reclaim del nivel $97.2K", "Volumen alto en recuperación"],
+      "risk_factors": ["Volatilidad elevada", "Presión vendedora residual"],
+      "invalidation_conditions": ["Precio pierde $96.8K", "Nuevo flush sin reclaim"]
+    },
+    "execution_candidate": {
+      "entry_zone": { "min": 97200, "max": 97600, "ideal": 97400 },
+      "stop_loss": 96800,
+      "take_profit": 98500,
+      "position_size_pct": 2,
+      "risk_reward_ratio": 1.83,
+      "order_type_suggested": "limit",
+      "time_in_force_suggested": "gtc"
+    }
   }],
-  "pattern": {...},
-  "thesis": {...},
-  "execution_candidate": {...},
-  "recommendation": "APPROVE"
+  "confidence": 0.85,
+  "recommendation": "APPROVE",
+  "risk_notes": ["Setup válido con confirmaciones suficientes"]
 }
 
 ### Ejemplo 3: Ambas alertas
-Input: Mucha volatilidad + flush reclaim claro
+Input: Mucha volatilidad + flush reclaim claro, precio $97500
 Output:
 {
   "decision": "ALERT",
+  "risk_confidence": 0.75,
+  "setup_confidence": 0.82,
   "alerts": [
-    {"type": "RISK_ALERT", "risk_type": "VOLATILITY_SPIKE", ...},
-    {"type": "TRADE_ALERT", "pattern": {...}, ...}
+    {
+      "type": "RISK_ALERT",
+      "risk_type": "VOLATILITY_SPIKE",
+      "risk_level": "medium",
+      "risk_description": "ATR elevado 1.8%, mercado volátil",
+      "confidence": 0.75,
+      "timeframe": "1h"
+    },
+    {
+      "type": "TRADE_ALERT",
+      "confidence": 0.82,
+      "timeframe": "10m",
+      "pattern": {
+        "type": "FLUSH_RECLAIM",
+        "setup": "LONG_SETUP",
+        "flush_score": 68,
+        "burst_score": 50,
+        "absorption_score": 55,
+        "total_score": 173,
+        "confirmations": {
+          "reclaim_confirmed": true,
+          "absorption_confirmed": true,
+          "whale_confirmed": false,
+          "volume_confirmed": true,
+          "momentum_confirmed": false
+        },
+        "key_level": 97000,
+        "invalidation_level": 96500
+      },
+      "thesis": {
+        "title": "Flush reclaim en soporte $97K pese a volatilidad",
+        "summary": "Setup válido pero operar con precaución por volatilidad",
+        "reasoning": "Flush absorbido y reclamado, pero ATR alto indica riesgo",
+        "supporting_factors": ["Reclaim confirmado", "Absorción detectada", "Volumen alto"],
+        "risk_factors": ["Alta volatilidad", "Sin confirmación whale"],
+        "invalidation_conditions": ["Precio pierde $96.5K"]
+      },
+      "execution_candidate": {
+        "entry_zone": { "min": 97000, "max": 97400, "ideal": 97200 },
+        "stop_loss": 96500,
+        "take_profit": 98200,
+        "position_size_pct": 1,
+        "risk_reward_ratio": 1.43,
+        "order_type_suggested": "limit",
+        "time_in_force_suggested": "gtc"
+      }
+    }
   ],
-  "risk_notes": ["CUIDADO: Setup válido pero alta volatilidad"]
+  "confidence": 0.82,
+  "recommendation": "WAIT",
+  "risk_notes": ["CUIDADO: Setup válido pero alta volatilidad, reducir tamaño"]
 }
 
 Idioma: Español (Colombia). Estilo: técnico, claro, sin humo.`;
