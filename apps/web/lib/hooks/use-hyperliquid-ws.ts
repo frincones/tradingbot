@@ -162,13 +162,13 @@ class HLWebSocketManager {
         this.connecting = false;
         this.reconnectAttempt = 0;
 
-        // Start ping
+        // Start ping - 8s interval to prevent Hyperliquid idle disconnections
         if (this.pingInterval) clearInterval(this.pingInterval);
         this.pingInterval = setInterval(() => {
           if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({ method: 'ping' }));
           }
-        }, 15000);
+        }, 8000);
 
         // Re-subscribe to all active subscriptions
         this.subscriptions.forEach((count, subJson) => {

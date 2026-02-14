@@ -211,6 +211,8 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
   const flushEvents = useRef<FlushEvent[]>([]);
   const burstEvents = useRef<BurstEvent[]>([]);
   const absorptionEvents = useRef<AbsorptionEvent[]>([]);
+  // Dedup: track processed trade hashes to avoid duplicates on WS reconnect
+  const processedTradeHashes = useRef<Set<string>>(new Set());
   const analysisIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const isAnalyzingRef = useRef(false);
   // Forward-declared ref for triggerAnalysis (set later when function is defined)
@@ -225,59 +227,81 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
 
   const handleWhaleTrade = useCallback(
     (trade: HLWSWhaleTrade) => {
-      console.log('[Sentinel] 🐋 Whale trade callback:', trade.coin, '$' + trade.notionalUsd.toFixed(0), trade.side);
-      if (trade.coin === symbol) {
-        console.log('[Sentinel] ✅ Capturing whale trade for', symbol);
-        whaleTrades.current = [
-          trade,
-          ...whaleTrades.current.slice(0, MAX_WHALE_TRADES_BUFFER - 1),
+      // Early return for non-target coins to reduce log spam
+      if (trade.coin !== symbol) return;
+
+      // Dedup: skip trades already processed (prevents duplicates on WS reconnect)
+      if (processedTradeHashes.current.has(trade.hash)) {
+        return;
+      }
+      processedTradeHashes.current.add(trade.hash);
+      // Prevent memory leak: trim hash set when it grows too large
+      if (processedTradeHashes.current.size > 500) {
+        const entries = [...processedTradeHashes.current];
+        processedTradeHashes.current = new Set(entries.slice(-250));
+      }
+
+      console.log('[Sentinel] 🐋 Whale trade:', trade.coin, '$' + trade.notionalUsd.toFixed(0), trade.side);
+      whaleTrades.current = [
+        trade,
+        ...whaleTrades.current.slice(0, MAX_WHALE_TRADES_BUFFER - 1),
+      ];
+
+      // Simple flush detection based on large sells
+      const isLargeTrade = trade.notionalUsd > whaleThresholdUsd * 2;
+      console.log('[Sentinel] 📈 Event check:', {
+        notional: trade.notionalUsd.toFixed(0),
+        threshold: whaleThresholdUsd * 2,
+        isLarge: isLargeTrade,
+        side: trade.side,
+      });
+
+      if (isLargeTrade && trade.side !== 'B') {
+        console.log('[Sentinel] 🔻 Creating FLUSH event for $' + trade.notionalUsd.toFixed(0));
+        const flushEvent: FlushEvent = {
+          type: 'flush',
+          direction: 'short',
+          price_level: parseFloat(trade.px),
+          volume_spike: trade.notionalUsd,
+          reclaim_detected: false,
+          confidence: Math.min(trade.notionalUsd / (whaleThresholdUsd * 5), 1),
+          timestamp: trade.time,
+        };
+        flushEvents.current = [
+          flushEvent,
+          ...flushEvents.current.slice(0, MAX_EVENTS_BUFFER - 1),
         ];
+        console.log('[Sentinel] 📊 Flush events count:', flushEvents.current.length);
+      }
 
-        // Simple flush detection based on large sells
-        const isLargeTrade = trade.notionalUsd > whaleThresholdUsd * 2;
-        console.log('[Sentinel] 📈 Event check:', {
-          notional: trade.notionalUsd.toFixed(0),
-          threshold: whaleThresholdUsd * 2,
-          isLarge: isLargeTrade,
-          side: trade.side,
+      // Simple burst detection based on large buys
+      if (isLargeTrade && trade.side === 'B') {
+        console.log('[Sentinel] 🔺 Creating BURST event for $' + trade.notionalUsd.toFixed(0));
+        const burstEvent: BurstEvent = {
+          type: 'burst',
+          direction: 'long',
+          momentum: trade.notionalUsd / whaleThresholdUsd,
+          price_change: 0,
+          volume_ratio: trade.notionalUsd / whaleThresholdUsd,
+          confidence: Math.min(trade.notionalUsd / (whaleThresholdUsd * 5), 1),
+          timestamp: trade.time,
+        };
+        burstEvents.current = [
+          burstEvent,
+          ...burstEvents.current.slice(0, MAX_EVENTS_BUFFER - 1),
+        ];
+        console.log('[Sentinel] 📊 Burst events count:', burstEvents.current.length);
+      }
+
+      // C3b: Reclaim detection - if a large buy occurs near a recent flush price, mark it as reclaimed
+      if (isLargeTrade && trade.side === 'B') {
+        const tradePrice = parseFloat(trade.px);
+        flushEvents.current = flushEvents.current.map(f => {
+          if (!f.reclaim_detected && Math.abs(f.price_level - tradePrice) / tradePrice < 0.005) {
+            return { ...f, reclaim_detected: true };
+          }
+          return f;
         });
-
-        if (isLargeTrade && trade.side !== 'B') {
-          console.log('[Sentinel] 🔻 Creating FLUSH event for $' + trade.notionalUsd.toFixed(0));
-          const flushEvent: FlushEvent = {
-            type: 'flush',
-            direction: 'short',
-            price_level: parseFloat(trade.px),
-            volume_spike: trade.notionalUsd,
-            reclaim_detected: false,
-            confidence: Math.min(trade.notionalUsd / (whaleThresholdUsd * 5), 1),
-            timestamp: trade.time,
-          };
-          flushEvents.current = [
-            flushEvent,
-            ...flushEvents.current.slice(0, MAX_EVENTS_BUFFER - 1),
-          ];
-          console.log('[Sentinel] 📊 Flush events count:', flushEvents.current.length);
-        }
-
-        // Simple burst detection based on large buys
-        if (isLargeTrade && trade.side === 'B') {
-          console.log('[Sentinel] 🔺 Creating BURST event for $' + trade.notionalUsd.toFixed(0));
-          const burstEvent: BurstEvent = {
-            type: 'burst',
-            direction: 'long',
-            momentum: trade.notionalUsd / whaleThresholdUsd,
-            price_change: 0,
-            volume_ratio: trade.notionalUsd / whaleThresholdUsd,
-            confidence: Math.min(trade.notionalUsd / (whaleThresholdUsd * 5), 1),
-            timestamp: trade.time,
-          };
-          burstEvents.current = [
-            burstEvent,
-            ...burstEvents.current.slice(0, MAX_EVENTS_BUFFER - 1),
-          ];
-          console.log('[Sentinel] 📊 Burst events count:', burstEvents.current.length);
-        }
       }
     },
     [symbol, whaleThresholdUsd]
@@ -391,6 +415,14 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
     }
 
     const now = Date.now();
+
+    // C3a: Prune stale events older than 4h from buffers to prevent unbounded growth
+    flushEvents.current = flushEvents.current.filter(e => e.timestamp >= now - TIMEFRAME_4H_MS);
+    burstEvents.current = burstEvents.current.filter(e => e.timestamp >= now - TIMEFRAME_4H_MS);
+    absorptionEvents.current = absorptionEvents.current.filter(e => e.timestamp >= now - TIMEFRAME_4H_MS);
+    // Also prune stale whale trades (older than 4h)
+    whaleTrades.current = whaleTrades.current.filter(t => t.time >= now - TIMEFRAME_4H_MS);
+
     const trades = whaleTrades.current;
 
     // Convert whale trades for timeframe calculation
@@ -676,6 +708,12 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
           riskConfidence: v2Response.risk_confidence,
           setupConfidence: v2Response.setup_confidence,
         });
+        // C3c: After a non-alert analysis, prune events older than 10min
+        // These events were analyzed and didn't warrant an alert, so clear them
+        const tenMinAgo = Date.now() - TIMEFRAME_10M_MS;
+        flushEvents.current = flushEvents.current.filter(e => e.timestamp >= tenMinAgo);
+        burstEvents.current = burstEvents.current.filter(e => e.timestamp >= tenMinAgo);
+        absorptionEvents.current = absorptionEvents.current.filter(e => e.timestamp >= tenMinAgo);
       }
     } catch (error) {
       const errorMessage =
@@ -706,8 +744,11 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
   // Update the ref with the actual triggerAnalysis function
   triggerAnalysisRef.current = triggerAnalysis;
 
+  // C5: Timers are decoupled from WebSocket connection state.
+  // buildBundle() has a REST API fallback, so analysis can run even when WS is briefly disconnected.
+  // This prevents the constant timer teardown/recreation cycle during rapid reconnections.
   useEffect(() => {
-    if (!enabled || !isConnected) {
+    if (!enabled) {
       if (analysisIntervalRef.current) {
         clearInterval(analysisIntervalRef.current);
         analysisIntervalRef.current = null;
@@ -715,7 +756,7 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
       return;
     }
 
-    console.log('[Sentinel] 🚀 Setting up analysis timers (enabled:', enabled, 'connected:', isConnected, ')');
+    console.log('[Sentinel] 🚀 Setting up analysis timers (enabled:', enabled, ')');
 
     // Initial analysis after a short delay to ensure market data arrives
     const initialTimeout = setTimeout(() => {
@@ -727,18 +768,13 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
         console.log('[Sentinel] ⏳ No market data yet, will retry in 5s');
         // Retry after another delay
         setTimeout(() => {
-          if (marketData.current) {
-            console.log('[Sentinel] ✅ Market data now available, starting analysis');
-            triggerAnalysisRef.current();
-          } else {
-            console.log('[Sentinel] ❌ Still no market data after retry, forcing analysis anyway');
-            triggerAnalysisRef.current(); // Try anyway - it will use REST API fallback
-          }
+          console.log('[Sentinel] ⏰ Retry analysis (will use REST fallback if no WS data)');
+          triggerAnalysisRef.current();
         }, 5000);
       }
-    }, 5000); // Reduced to 5s for faster initial feedback
+    }, 5000);
 
-    // Periodic analysis
+    // Periodic analysis - runs independently of WS connection
     analysisIntervalRef.current = setInterval(() => {
       console.log('[Sentinel] ⏰ Periodic analysis triggered');
       triggerAnalysisRef.current();
@@ -752,7 +788,7 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
         analysisIntervalRef.current = null;
       }
     };
-  }, [enabled, isConnected, analysisIntervalMs]);
+  }, [enabled, analysisIntervalMs]);
 
   // ============================================================================
   // RETURN

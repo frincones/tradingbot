@@ -17,7 +17,7 @@ const DEFAULT_CONFIG: Required<HLWebSocketConfig> = {
   reconnect: true,
   reconnectMaxAttempts: 10,
   reconnectDelay: 1000,
-  pingInterval: 30000,
+  pingInterval: 10000,
 };
 
 export class HyperliquidWebSocket {
