@@ -95,13 +95,27 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
   const fetchPendingAlerts = useCallback(async (): Promise<AtlasAlertCandidate[]> => {
     const supabase = getSupabaseBrowserClient();
 
-    // Only fetch TRADE_ALERTs (not RISK_ALERTs) since those are the ones with execution data
+    // First, bulk-dismiss any stale alerts with setup=NONE (RISK_ALERTs or invalid TRADE_ALERTs)
+    // This cleans up the table so they don't keep appearing in queries
+    const { count: dismissedCount } = await supabase
+      .from('agent_alerts')
+      .update({ status: 'dismissed' as const, action_taken: 'bulk_cleanup_none_setup' })
+      .eq('symbol', symbol)
+      .eq('status', 'new')
+      .eq('setup', 'NONE');
+
+    if (dismissedCount && dismissedCount > 0) {
+      console.log(`[Atlas Entry] Bulk-dismissed ${dismissedCount} NONE-setup alerts`);
+    }
+
+    // Only fetch TRADE_ALERTs with valid LONG/SHORT setup
     const { data: alerts, error } = await supabase
       .from('agent_alerts')
       .select('*')
       .eq('symbol', symbol)
       .eq('status', 'new')
       .eq('decision', 'ALERT')
+      .in('setup', ['LONG', 'SHORT'])
       .order('confidence', { ascending: false })
       .limit(3);
 
@@ -126,15 +140,11 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
       const thesis = alert.thesis_json as Record<string, unknown> | null;
       const execution = alert.execution_json as Record<string, unknown> | null;
 
-      // Determine setup — dismiss alerts without valid setup so they don't persist
+      // Setup is guaranteed to be LONG or SHORT by the query filter
       const setup = alert.setup as string;
       if (setup !== 'LONG' && setup !== 'SHORT') {
-        console.warn('[Atlas Entry] Dismissing alert without valid setup:', alert.id, 'setup:', setup);
-        // Auto-dismiss invalid alerts to prevent re-processing
-        await supabase
-          .from('agent_alerts')
-          .update({ status: 'dismissed' as const, action_taken: 'invalid_setup' })
-          .eq('id', alert.id);
+        // Safety check — shouldn't happen after query filter
+        console.warn('[Atlas Entry] Unexpected setup in filtered results:', alert.id, 'setup:', setup);
         continue;
       }
 

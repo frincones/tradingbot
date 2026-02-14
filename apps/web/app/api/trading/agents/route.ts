@@ -800,6 +800,20 @@ export async function POST(request: NextRequest) {
             patternSetup === 'LONG_SETUP' ? 'LONG' :
             patternSetup === 'SHORT_SETUP' ? 'SHORT' : 'NONE';
 
+          // RISK_ALERTs are informational only — log them but don't store in agent_alerts
+          // They were flooding the table and causing Atlas Entry to waste cycles dismissing them
+          if (alert.type === 'RISK_ALERT') {
+            storedAlerts.push({
+              type: alert.type,
+              action: 'logged_only: risk alerts are informational',
+              risk_type: alert.risk_type,
+              risk_level: alert.risk_level,
+              confidence: alert.confidence,
+            });
+            console.log(`[Sentinel V2] ℹ️ RISK_ALERT logged (not stored): ${alert.risk_type} ${alert.risk_level} ${(alert.confidence * 100).toFixed(0)}%`);
+            continue;
+          }
+
           // Skip TRADE_ALERTs without valid setup or execution data
           if (alert.type === 'TRADE_ALERT') {
             if (alertSetup === 'NONE') {
