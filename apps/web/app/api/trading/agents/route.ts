@@ -805,10 +805,7 @@ export async function POST(request: NextRequest) {
           if (alert.type === 'RISK_ALERT') {
             storedAlerts.push({
               type: alert.type,
-              action: 'logged_only: risk alerts are informational',
-              risk_type: alert.risk_type,
-              risk_level: alert.risk_level,
-              confidence: alert.confidence,
+              action: `logged_only: ${alert.risk_type} ${alert.risk_level} ${(alert.confidence * 100).toFixed(0)}%`,
             });
             console.log(`[Sentinel V2] ℹ️ RISK_ALERT logged (not stored): ${alert.risk_type} ${alert.risk_level} ${(alert.confidence * 100).toFixed(0)}%`);
             continue;

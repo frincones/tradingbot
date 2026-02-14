@@ -8,6 +8,7 @@ import { getSupabaseServerClient } from '@kit/supabase/server-client';
 import { executeTradeOnBinance } from '@kit/integrations/binance';
 
 export const maxDuration = 30; // Allow time for Binance API call
+export const preferredRegion = ['fra1']; // Frankfurt - Binance is geo-blocked in US regions
 
 interface ExecuteEntryRequest {
   candidateId: string;
