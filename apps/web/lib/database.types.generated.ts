@@ -75,6 +75,93 @@ export type Database = {
         }
         Relationships: []
       }
+      agent_alerts: {
+        Row: {
+          id: string
+          user_id: string
+          strategy_id: string | null
+          agent_trace_id: string | null
+          ts: string
+          symbol: string
+          decision: Database["public"]["Enums"]["alert_decision"]
+          setup: Database["public"]["Enums"]["setup_type"]
+          pattern_json: Json
+          thesis_json: Json
+          execution_json: Json | null
+          confidence: number
+          recommendation: Database["public"]["Enums"]["alert_recommendation"]
+          risk_notes: string[] | null
+          status: Database["public"]["Enums"]["alert_status"]
+          viewed_at: string | null
+          actioned_at: string | null
+          action_taken: string | null
+          expires_at: string | null
+          created_at: string
+          updated_at: string
+        }
+        Insert: {
+          id?: string
+          user_id: string
+          strategy_id?: string | null
+          agent_trace_id?: string | null
+          ts?: string
+          symbol: string
+          decision: Database["public"]["Enums"]["alert_decision"]
+          setup: Database["public"]["Enums"]["setup_type"]
+          pattern_json?: Json
+          thesis_json?: Json
+          execution_json?: Json | null
+          confidence: number
+          recommendation: Database["public"]["Enums"]["alert_recommendation"]
+          risk_notes?: string[] | null
+          status?: Database["public"]["Enums"]["alert_status"]
+          viewed_at?: string | null
+          actioned_at?: string | null
+          action_taken?: string | null
+          expires_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Update: {
+          id?: string
+          user_id?: string
+          strategy_id?: string | null
+          agent_trace_id?: string | null
+          ts?: string
+          symbol?: string
+          decision?: Database["public"]["Enums"]["alert_decision"]
+          setup?: Database["public"]["Enums"]["setup_type"]
+          pattern_json?: Json
+          thesis_json?: Json
+          execution_json?: Json | null
+          confidence?: number
+          recommendation?: Database["public"]["Enums"]["alert_recommendation"]
+          risk_notes?: string[] | null
+          status?: Database["public"]["Enums"]["alert_status"]
+          viewed_at?: string | null
+          actioned_at?: string | null
+          action_taken?: string | null
+          expires_at?: string | null
+          created_at?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "agent_alerts_strategy_id_fkey"
+            columns: ["strategy_id"]
+            isOneToOne: false
+            referencedRelation: "strategies"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "agent_alerts_agent_trace_id_fkey"
+            columns: ["agent_trace_id"]
+            isOneToOne: false
+            referencedRelation: "agent_traces"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       agent_proposals: {
         Row: {
           agent_trace_id: string | null
@@ -512,7 +599,11 @@ export type Database = {
       }
       orders: {
         Row: {
+          alert_id: string | null
           alpaca_order_id: string | null
+          binance_client_order_id: string | null
+          binance_order_id: number | null
+          broker: string | null
           cancelled_at: string | null
           client_order_id: string
           created_at: string
@@ -520,7 +611,7 @@ export type Database = {
           filled_avg_price: number | null
           filled_qty: number | null
           id: string
-          intent_id: string
+          intent_id: string | null
           is_paper: boolean
           limit_price: number | null
           order_type: Database["public"]["Enums"]["order_type"]
@@ -537,7 +628,11 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          alert_id?: string | null
           alpaca_order_id?: string | null
+          binance_client_order_id?: string | null
+          binance_order_id?: number | null
+          broker?: string | null
           cancelled_at?: string | null
           client_order_id: string
           created_at?: string
@@ -545,7 +640,7 @@ export type Database = {
           filled_avg_price?: number | null
           filled_qty?: number | null
           id?: string
-          intent_id: string
+          intent_id?: string | null
           is_paper?: boolean
           limit_price?: number | null
           order_type: Database["public"]["Enums"]["order_type"]
@@ -562,7 +657,11 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          alert_id?: string | null
           alpaca_order_id?: string | null
+          binance_client_order_id?: string | null
+          binance_order_id?: number | null
+          broker?: string | null
           cancelled_at?: string | null
           client_order_id?: string
           created_at?: string
@@ -570,7 +669,7 @@ export type Database = {
           filled_avg_price?: number | null
           filled_qty?: number | null
           id?: string
-          intent_id?: string
+          intent_id?: string | null
           is_paper?: boolean
           limit_price?: number | null
           order_type?: Database["public"]["Enums"]["order_type"]
@@ -1228,6 +1327,9 @@ export type Database = {
       }
     }
     Enums: {
+      alert_decision: "ALERT" | "NO_ALERT" | "NEED_MORE_DATA"
+      alert_recommendation: "APPROVE" | "WAIT" | "BLOCK"
+      alert_status: "new" | "viewed" | "dismissed" | "actioned" | "expired"
       intent_status:
         | "pending"
         | "approved"
@@ -1894,6 +1996,9 @@ export const Constants = {
   },
   public: {
     Enums: {
+      alert_decision: ["ALERT", "NO_ALERT", "NEED_MORE_DATA"],
+      alert_recommendation: ["APPROVE", "WAIT", "BLOCK"],
+      alert_status: ["new", "viewed", "dismissed", "actioned", "expired"],
       intent_status: [
         "pending",
         "approved",

@@ -101,8 +101,8 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
       .eq('symbol', symbol)
       .eq('status', 'new')
       .eq('decision', 'ALERT')
-      .order('created_at', { ascending: false })
-      .limit(10);
+      .order('confidence', { ascending: false })
+      .limit(3);
 
     if (error) {
       console.error('[Atlas Entry] Error fetching alerts:', error);
@@ -362,6 +362,25 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
       // Notify for each approved entry
       for (const entry of approved) {
         onEntryApproved?.(entry.candidate_id, atlasResponse);
+      }
+
+      // Mark BLOCK'd alerts as dismissed to prevent re-analysis loops
+      if (blocked.length > 0) {
+        const supabase = getSupabaseBrowserClient();
+        const blockedIds = blocked.map(e => e.candidate_id);
+        const { error: dismissError } = await supabase
+          .from('agent_alerts')
+          .update({
+            status: 'dismissed' as const,
+            action_taken: 'blocked_by_atlas',
+          })
+          .in('id', blockedIds);
+
+        if (dismissError) {
+          console.warn('[Atlas Entry] Failed to dismiss blocked alerts:', dismissError);
+        } else {
+          console.log('[Atlas Entry] Dismissed', blockedIds.length, 'blocked alerts');
+        }
       }
     } catch (error) {
       clearTimeout(timeoutId);

@@ -134,7 +134,7 @@ export class BinanceClient {
    * Create a new order
    */
   async createOrder(params: CreateBinanceOrderParams): Promise<BinanceOrder> {
-    return this.request<BinanceOrder>('/api/v3/order', 'POST', params, true);
+    return this.request<BinanceOrder>('/api/v3/order', 'POST', params as unknown as Record<string, unknown>, true);
   }
 
   /**

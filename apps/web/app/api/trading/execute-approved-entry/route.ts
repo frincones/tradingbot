@@ -144,7 +144,7 @@ export async function POST(request: NextRequest) {
           symbol: `${symbol}USDT`,
           name: 'Atlas Auto Trading',
           description: 'Automated trading based on Atlas Entry approvals',
-          status: 'active',
+          current_state: 'ORDERING',
         })
         .select('id')
         .single();
@@ -165,25 +165,34 @@ export async function POST(request: NextRequest) {
     // ============================================================================
 
     const filledQty = parseFloat(orderResult.entryOrder.executedQty || '0');
-    const filledPrice = parseFloat(orderResult.entryOrder.cummulativeQuoteQty || '0') / filledQty;
+    const quoteQty = parseFloat(orderResult.entryOrder.cummulativeQuoteQty || '0');
+    const filledPrice = filledQty > 0 ? quoteQty / filledQty : 0;
+
+    // Generate unique client order ID
+    const clientOrderId = `atlas-${candidateId.slice(0, 8)}-${Date.now()}`;
+
+    // Map Binance status to DB order_status enum
+    const dbStatus = mapBinanceStatus(orderResult.entryOrder.status);
 
     const { data: savedOrder, error: saveError } = await client
       .from('orders')
       .insert({
         strategy_id: strategyId,
+        client_order_id: clientOrderId,
         symbol: `${symbol}USDT`,
-        side: side.toLowerCase(),
-        type: 'market',
-        status: orderResult.entryOrder.status.toLowerCase(),
-        qty: filledQty.toString(),
-        filled_qty: filledQty.toString(),
-        filled_avg_price: filledPrice.toString(),
+        side: side.toLowerCase() as 'buy' | 'sell',
+        order_type: 'market',
+        status: dbStatus,
+        qty: filledQty || sizeUsd,
+        filled_qty: filledQty > 0 ? filledQty : null,
+        filled_avg_price: filledPrice > 0 ? filledPrice : null,
         broker: 'binance',
         binance_order_id: orderResult.entryOrder.orderId,
         binance_client_order_id: orderResult.entryOrder.clientOrderId,
-        stop_price: stopLoss > 0 ? stopLoss.toString() : null,
-        filled_at: new Date().toISOString(),
-        intent_id: candidateId, // Link to the alert that triggered this order
+        stop_price: stopLoss > 0 ? stopLoss : null,
+        filled_at: filledQty > 0 ? new Date().toISOString() : null,
+        alert_id: candidateId,
+        is_paper: false,
       })
       .select('id')
       .single();
@@ -205,8 +214,9 @@ export async function POST(request: NextRequest) {
     const { error: updateError } = await client
       .from('agent_alerts')
       .update({
-        status: 'executed',
-        updated_at: new Date().toISOString(),
+        status: 'actioned' as const,
+        actioned_at: new Date().toISOString(),
+        action_taken: 'executed',
       })
       .eq('id', candidateId);
 
@@ -238,5 +248,20 @@ export async function POST(request: NextRequest) {
       },
       { status: 500 }
     );
+  }
+}
+
+/**
+ * Map Binance order status to DB order_status enum
+ */
+function mapBinanceStatus(binanceStatus: string): 'pending' | 'submitted' | 'filled' | 'partially_filled' | 'cancelled' | 'rejected' | 'expired' {
+  switch (binanceStatus) {
+    case 'FILLED': return 'filled';
+    case 'PARTIALLY_FILLED': return 'partially_filled';
+    case 'NEW': return 'submitted';
+    case 'CANCELED': return 'cancelled';
+    case 'REJECTED': return 'rejected';
+    case 'EXPIRED': return 'expired';
+    default: return 'pending';
   }
 }

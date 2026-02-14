@@ -4,10 +4,8 @@
  */
 
 // Vercel Serverless Function Configuration
-// Required for OpenAI API calls which can take 5-15 seconds
-// NOTE: Hobby plan maxes out at 10s, Pro plan allows up to 60s
-// Some complex analyses may timeout on Hobby plan - consider upgrading to Pro
-export const maxDuration = 50; // seconds (requires Pro plan for >10s)
+// OpenAI agent calls typically take 5-30 seconds
+export const maxDuration = 60;
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseServerClient } from '@kit/supabase/server-client';
@@ -213,7 +211,7 @@ async function checkConflictingPositions(
     .select('id, side')
     .eq('broker', 'binance')
     .in('strategy_id', strategyIds)
-    .in('status', ['new', 'partially_filled']);
+    .in('status', ['submitted', 'partially_filled']);
 
   if (openOrders && openOrders.length > 0) {
     const orders = openOrders as Array<{ id: string; side: string }>;
@@ -907,7 +905,7 @@ export async function POST(request: NextRequest) {
             .select('*')
             .eq('id', tradeId)
             .eq('broker', 'binance')
-            .in('status', ['new', 'partially_filled'])
+            .in('status', ['submitted', 'partially_filled'])
             .single();
           return position || { error: 'Position not found' };
         });
@@ -1071,7 +1069,7 @@ export async function POST(request: NextRequest) {
             .select('*')
             .eq('id', tradeId)
             .eq('broker', 'binance')
-            .in('status', ['new', 'partially_filled'])
+            .in('status', ['submitted', 'partially_filled'])
             .single();
           return position || { error: 'Position not found' };
         });

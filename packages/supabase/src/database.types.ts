@@ -599,7 +599,11 @@ export type Database = {
       }
       orders: {
         Row: {
+          alert_id: string | null
           alpaca_order_id: string | null
+          binance_client_order_id: string | null
+          binance_order_id: number | null
+          broker: string | null
           cancelled_at: string | null
           client_order_id: string
           created_at: string
@@ -607,7 +611,7 @@ export type Database = {
           filled_avg_price: number | null
           filled_qty: number | null
           id: string
-          intent_id: string
+          intent_id: string | null
           is_paper: boolean
           limit_price: number | null
           order_type: Database["public"]["Enums"]["order_type"]
@@ -624,7 +628,11 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          alert_id?: string | null
           alpaca_order_id?: string | null
+          binance_client_order_id?: string | null
+          binance_order_id?: number | null
+          broker?: string | null
           cancelled_at?: string | null
           client_order_id: string
           created_at?: string
@@ -632,7 +640,7 @@ export type Database = {
           filled_avg_price?: number | null
           filled_qty?: number | null
           id?: string
-          intent_id: string
+          intent_id?: string | null
           is_paper?: boolean
           limit_price?: number | null
           order_type: Database["public"]["Enums"]["order_type"]
@@ -649,7 +657,11 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          alert_id?: string | null
           alpaca_order_id?: string | null
+          binance_client_order_id?: string | null
+          binance_order_id?: number | null
+          broker?: string | null
           cancelled_at?: string | null
           client_order_id?: string
           created_at?: string
@@ -657,7 +669,7 @@ export type Database = {
           filled_avg_price?: number | null
           filled_qty?: number | null
           id?: string
-          intent_id?: string
+          intent_id?: string | null
           is_paper?: boolean
           limit_price?: number | null
           order_type?: Database["public"]["Enums"]["order_type"]
