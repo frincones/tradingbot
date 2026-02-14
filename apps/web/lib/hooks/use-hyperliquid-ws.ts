@@ -136,8 +136,9 @@ class HLWebSocketManager {
   private pingInterval: ReturnType<typeof setInterval> | null = null;
   private subscriptions = new Map<string, number>(); // subJson -> refCount
   private listeners = new Map<string, HookCallbacks>(); // listenerId -> callbacks
-  private connectionListeners = new Set<() => void>();
   private connecting = false;
+  private connectedAt = 0;
+  private recentDisconnects: number[] = []; // timestamps of recent disconnects
 
   connect(): void {
     // Prevent multiple simultaneous connections
@@ -160,15 +161,20 @@ class HLWebSocketManager {
         console.log('[HL WS Manager] Connected (singleton)');
         this.isConnected = true;
         this.connecting = false;
-        this.reconnectAttempt = 0;
+        this.connectedAt = Date.now();
 
-        // Start ping - 8s interval to prevent Hyperliquid idle disconnections
+        // Send immediate ping to keep connection alive
+        if (this.ws?.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify({ method: 'ping' }));
+        }
+
+        // Start ping interval - 5s to stay well within Hyperliquid's idle timeout
         if (this.pingInterval) clearInterval(this.pingInterval);
         this.pingInterval = setInterval(() => {
           if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({ method: 'ping' }));
           }
-        }, 8000);
+        }, 5000);
 
         // Re-subscribe to all active subscriptions
         this.subscriptions.forEach((count, subJson) => {
@@ -187,7 +193,15 @@ class HLWebSocketManager {
           const message: WSMessage = JSON.parse(event.data);
           const { channel, data } = message;
 
-          if (channel === 'pong' || channel === 'subscriptionResponse') {
+          if (channel === 'pong') {
+            // Only reset reconnect counter after connection is stable for 15s
+            if (this.connectedAt > 0 && Date.now() - this.connectedAt > 15000) {
+              this.reconnectAttempt = 0;
+            }
+            return;
+          }
+
+          if (channel === 'subscriptionResponse') {
             return;
           }
 
@@ -214,12 +228,27 @@ class HLWebSocketManager {
           this.pingInterval = null;
         }
 
+        // Track recent disconnects for rate limiting
+        const now = Date.now();
+        this.recentDisconnects.push(now);
+        // Keep only last 60 seconds of disconnect history
+        this.recentDisconnects = this.recentDisconnects.filter(t => now - t < 60000);
+
         // Notify all listeners
         this.listeners.forEach(cb => cb.onDisconnect?.());
 
         // Auto-reconnect with exponential backoff
         if (this.reconnectAttempt >= 0 && this.listeners.size > 0) {
-          const delay = Math.min(2000 * Math.pow(1.5, this.reconnectAttempt), 60000);
+          // If too many disconnects recently, use a longer cooldown
+          const recentCount = this.recentDisconnects.length;
+          let delay: number;
+          if (recentCount >= 5) {
+            // Heavily throttled: 15-30 seconds
+            delay = 15000 + Math.random() * 15000;
+            console.log(`[HL WS Manager] Too many disconnects (${recentCount} in 60s), cooling down...`);
+          } else {
+            delay = Math.min(2000 * Math.pow(1.5, this.reconnectAttempt), 60000);
+          }
           console.log(`[HL WS Manager] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempt + 1})...`);
 
           this.reconnectTimeout = setTimeout(() => {

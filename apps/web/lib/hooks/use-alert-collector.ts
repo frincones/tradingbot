@@ -389,6 +389,8 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
 
     if (!md) {
       // Fetch market data from REST API as fallback
+      // REST API returns ParsedAssetCtx format (markPrice, oraclePrice as numbers)
+      // but buildBundle expects HLWSActiveAssetData format (markPx, oraclePx as strings)
       console.log('[Sentinel] 🔄 Fetching market data via REST API for', symbol);
       try {
         const response = await fetch(`/api/trading/market-data?type=asset-contexts`);
@@ -396,11 +398,20 @@ export function useAlertCollector(options: UseAlertCollectorOptions) {
           const allAssets = await response.json();
           const assetData = allAssets.find((a: { coin: string }) => a.coin === symbol);
           if (assetData) {
-            md = assetData;
-            marketData.current = assetData; // Cache it
+            // Transform REST format (ParsedAssetCtx) to WS format (HLWSActiveAssetData)
+            md = {
+              coin: assetData.coin,
+              markPx: String(assetData.markPrice ?? assetData.markPx ?? '0'),
+              oraclePx: String(assetData.oraclePrice ?? assetData.oraclePx ?? '0'),
+              funding: String(assetData.funding ?? '0'),
+              openInterest: String(assetData.openInterest ?? '0'),
+              dayNtlVlm: String(assetData.volume24h ?? assetData.dayNtlVlm ?? '0'),
+              prevDayPx: String(assetData.prevDayPrice ?? assetData.prevDayPx ?? '0'),
+            };
+            marketData.current = md;
             console.log('[Sentinel] ✅ Market data fetched via REST:', symbol, {
-              markPx: assetData.markPx,
-              oraclePx: assetData.oraclePx,
+              markPx: md.markPx,
+              oraclePx: md.oraclePx,
             });
           }
         }
