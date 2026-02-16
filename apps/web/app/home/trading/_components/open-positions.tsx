@@ -62,16 +62,22 @@ export function OpenPositions({ currentPrices }: Props) {
     }
   };
 
-  // Compute live P&L using currentPrices from WebSocket
+  // Compute live P&L using currentPrices from WebSocket (prioritize live data)
   const computePnl = (position: Position): number => {
-    if (position.unrealized_pnl != null) return position.unrealized_pnl;
     const entryPrice = position.avg_entry_price || 0;
-    if (entryPrice === 0) return 0;
+    if (entryPrice === 0) return position.unrealized_pnl ?? 0;
     // Try to get live price from WS data (symbol format: BTCUSDT -> BTC)
     const baseSymbol = position.symbol.replace('USDT', '').replace('/USD', '');
-    const livePrice = currentPrices?.[baseSymbol] || position.current_price || 0;
-    if (livePrice === 0) return 0;
-    const priceDiff = position.side === 'buy' ? livePrice - entryPrice : entryPrice - livePrice;
+    const livePrice = currentPrices?.[baseSymbol];
+    if (livePrice && livePrice > 0) {
+      const priceDiff = position.side === 'buy' ? livePrice - entryPrice : entryPrice - livePrice;
+      return priceDiff * position.qty;
+    }
+    // Fallback to DB values when no live price available
+    if (position.unrealized_pnl != null) return position.unrealized_pnl;
+    const fallbackPrice = position.current_price || 0;
+    if (fallbackPrice === 0) return 0;
+    const priceDiff = position.side === 'buy' ? fallbackPrice - entryPrice : entryPrice - fallbackPrice;
     return priceDiff * position.qty;
   };
 
@@ -95,10 +101,11 @@ export function OpenPositions({ currentPrices }: Props) {
   return (
     <ScrollArea className="h-full">
       {/* Table header */}
-      <div className="grid grid-cols-[1fr_0.6fr_0.8fr_0.8fr_0.5fr] gap-2 px-2 py-1 text-[10px] text-muted-foreground border-b sticky top-0 bg-background">
+      <div className="grid grid-cols-[1fr_0.5fr_0.8fr_0.7fr_0.7fr_0.4fr] gap-2 px-2 py-1 text-[10px] text-muted-foreground border-b sticky top-0 bg-background">
         <span>Symbol</span>
         <span>Side</span>
         <span className="text-right">Size/Entry</span>
+        <span className="text-right">Mark</span>
         <span className="text-right">P&L</span>
         <span></span>
       </div>
@@ -109,11 +116,13 @@ export function OpenPositions({ currentPrices }: Props) {
           const pnl = computePnl(position);
           const isProfit = pnl >= 0;
           const entryPrice = position.avg_entry_price || 0;
+          const baseSymbol = position.symbol.replace('USDT', '').replace('/USD', '');
+          const livePrice = currentPrices?.[baseSymbol] || position.current_price || 0;
 
           return (
             <div
               key={position.id}
-              className="grid grid-cols-[1fr_0.6fr_0.8fr_0.8fr_0.5fr] gap-2 px-2 py-1 items-center text-[11px] hover:bg-muted/30"
+              className="grid grid-cols-[1fr_0.5fr_0.8fr_0.7fr_0.7fr_0.4fr] gap-2 px-2 py-1 items-center text-[11px] hover:bg-muted/30"
             >
               <div className="flex items-center gap-1.5">
                 {position.side === 'buy' ? (
@@ -134,6 +143,9 @@ export function OpenPositions({ currentPrices }: Props) {
                 {entryPrice > 0 && (
                   <span className="text-[9px] ml-1">@${entryPrice.toFixed(2)}</span>
                 )}
+              </div>
+              <div className="text-right font-mono text-muted-foreground">
+                {livePrice > 0 ? `$${livePrice.toFixed(2)}` : '-'}
               </div>
               <div className={`text-right font-mono font-medium ${isProfit ? 'text-green-500' : 'text-red-500'}`}>
                 {isProfit ? '+' : ''}${pnl.toFixed(2)}
