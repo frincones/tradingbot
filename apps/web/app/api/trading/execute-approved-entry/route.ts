@@ -5,6 +5,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { getSupabaseServerClient } from '@kit/supabase/server-client';
+import { getSupabaseServerAdminClient } from '@kit/supabase/server-admin-client';
 import { executeTradeOnBinance } from '@kit/integrations/binance';
 
 export const maxDuration = 30; // Allow time for Binance API call
@@ -41,11 +42,14 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Use admin client for DB operations (orders table lacks INSERT RLS policy for authenticated users)
+    const adminClient = getSupabaseServerAdminClient();
+
     // ============================================================================
     // 1. FETCH ALERT DETAILS
     // ============================================================================
 
-    const { data: alert, error: alertError } = await client
+    const { data: alert, error: alertError } = await adminClient
       .from('agent_alerts')
       .select('*')
       .eq('id', candidateId)
@@ -164,7 +168,7 @@ export async function POST(request: NextRequest) {
     // Check if strategy exists for this user and symbol
     let strategyId: string;
 
-    const { data: existingStrategy } = await client
+    const { data: existingStrategy } = await adminClient
       .from('strategies')
       .select('id')
       .eq('user_id', user.id)
@@ -177,7 +181,7 @@ export async function POST(request: NextRequest) {
       console.log('[Execute Entry] Using existing strategy:', strategyId);
     } else {
       // Create new strategy
-      const { data: newStrategy, error: strategyError } = await client
+      const { data: newStrategy, error: strategyError } = await adminClient
         .from('strategies')
         .insert({
           user_id: user.id,
@@ -215,7 +219,7 @@ export async function POST(request: NextRequest) {
     // Map Binance status to DB order_status enum
     const dbStatus = mapBinanceStatus(orderResult.entryOrder.status);
 
-    const { data: savedOrder, error: saveError } = await client
+    const { data: savedOrder, error: saveError } = await adminClient
       .from('orders')
       .insert({
         strategy_id: strategyId,
@@ -241,7 +245,7 @@ export async function POST(request: NextRequest) {
     if (saveError) {
       console.error('[Execute Entry] Failed to save order:', saveError);
       return NextResponse.json(
-        { error: 'Order executed but failed to save to database' },
+        { error: 'Order executed but failed to save to database', details: saveError.message },
         { status: 500 }
       );
     }
@@ -252,7 +256,7 @@ export async function POST(request: NextRequest) {
     // 6. UPDATE ALERT STATUS
     // ============================================================================
 
-    const { error: updateError } = await client
+    const { error: updateError } = await adminClient
       .from('agent_alerts')
       .update({
         status: 'actioned' as const,
