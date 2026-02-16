@@ -19,7 +19,11 @@ interface Position {
   created_at: string;
 }
 
-export function OpenPositions() {
+interface Props {
+  currentPrices?: Record<string, number>;
+}
+
+export function OpenPositions({ currentPrices }: Props) {
   const [positions, setPositions] = useState<Position[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -58,6 +62,19 @@ export function OpenPositions() {
     }
   };
 
+  // Compute live P&L using currentPrices from WebSocket
+  const computePnl = (position: Position): number => {
+    if (position.unrealized_pnl != null) return position.unrealized_pnl;
+    const entryPrice = position.avg_entry_price || 0;
+    if (entryPrice === 0) return 0;
+    // Try to get live price from WS data (symbol format: BTCUSDT -> BTC)
+    const baseSymbol = position.symbol.replace('USDT', '').replace('/USD', '');
+    const livePrice = currentPrices?.[baseSymbol] || position.current_price || 0;
+    if (livePrice === 0) return 0;
+    const priceDiff = position.side === 'buy' ? livePrice - entryPrice : entryPrice - livePrice;
+    return priceDiff * position.qty;
+  };
+
   if (loading) {
     return (
       <div className="h-full flex items-center justify-center">
@@ -89,7 +106,7 @@ export function OpenPositions() {
       {/* Positions rows */}
       <div className="divide-y divide-border/50">
         {positions.map((position) => {
-          const pnl = position.unrealized_pnl || 0;
+          const pnl = computePnl(position);
           const isProfit = pnl >= 0;
           const entryPrice = position.avg_entry_price || 0;
 
@@ -114,7 +131,9 @@ export function OpenPositions() {
               </Badge>
               <div className="text-right font-mono text-muted-foreground">
                 <span>{position.qty}</span>
-                <span className="text-[9px] ml-1">@${entryPrice.toFixed(2)}</span>
+                {entryPrice > 0 && (
+                  <span className="text-[9px] ml-1">@${entryPrice.toFixed(2)}</span>
+                )}
               </div>
               <div className={`text-right font-mono font-medium ${isProfit ? 'text-green-500' : 'text-red-500'}`}>
                 {isProfit ? '+' : ''}${pnl.toFixed(2)}

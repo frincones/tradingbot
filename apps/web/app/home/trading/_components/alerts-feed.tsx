@@ -190,9 +190,17 @@ export function AlertsFeed({ onAlertClick, onNewAlert, onSimulateTrade }: Props)
 
   // Toggle expand
   const toggleExpand = (alertId: string) => {
+    const isExpanding = expandedId !== alertId;
     setExpandedId((prev) => (prev === alertId ? null : alertId));
     if (newAlertIds.has(alertId)) {
       markAsViewed(alertId);
+    }
+    // Auto-scroll expanded alert into view
+    if (isExpanding) {
+      setTimeout(() => {
+        const el = document.getElementById(`alert-${alertId}`);
+        el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 50);
     }
   };
 
@@ -242,6 +250,7 @@ export function AlertsFeed({ onAlertClick, onNewAlert, onSimulateTrade }: Props)
         {alerts.map((alert) => (
           <div
             key={alert.id}
+            id={`alert-${alert.id}`}
             className={cn(
               'border-b px-2 py-1.5 cursor-pointer hover:bg-muted/30 transition-colors',
               newAlertIds.has(alert.id) && 'bg-primary/5 border-l-2 border-l-primary'

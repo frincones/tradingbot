@@ -253,6 +253,32 @@ export async function POST(request: NextRequest) {
     console.log('[Execute Entry] Order saved to database:', savedOrder.id);
 
     // ============================================================================
+    // 5b. CREATE POSITION RECORD
+    // ============================================================================
+
+    const { error: positionError } = await adminClient
+      .from('positions')
+      .insert({
+        user_id: user.id,
+        strategy_id: strategyId,
+        symbol: `${symbol}USDT`,
+        side: side.toLowerCase() as 'buy' | 'sell',
+        qty: filledQty || sizeUsd,
+        avg_entry_price: filledPrice > 0 ? filledPrice : null,
+        entry_order_id: savedOrder.id,
+        entry_at: new Date().toISOString(),
+        is_open: true,
+        stop_loss_price: stopLoss > 0 ? stopLoss : null,
+        take_profit_price: takeProfit > 0 ? takeProfit : null,
+      });
+
+    if (positionError) {
+      console.warn('[Execute Entry] Failed to create position:', positionError);
+    } else {
+      console.log('[Execute Entry] Position record created');
+    }
+
+    // ============================================================================
     // 6. UPDATE ALERT STATUS
     // ============================================================================
 

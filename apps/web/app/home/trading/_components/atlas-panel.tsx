@@ -217,7 +217,9 @@ export function AtlasPanel({ symbol, enabled = true, onEntryApproved, onActionPr
         </TabsList>
 
         {/* Overview Tab */}
-        <TabsContent value="overview" className="flex-1 p-2 space-y-2 overflow-auto">
+        <TabsContent value="overview" className="flex-1 overflow-hidden">
+          <ScrollArea className="h-full">
+          <div className="p-2 space-y-2">
           {/* Entry Gatekeeping Status */}
           <div className="p-2 rounded border bg-card">
             <div className="flex items-center justify-between mb-1">
@@ -334,6 +336,8 @@ export function AtlasPanel({ symbol, enabled = true, onEntryApproved, onActionPr
               )}
             </div>
           )}
+          </div>
+          </ScrollArea>
         </TabsContent>
 
         {/* Entries Tab */}

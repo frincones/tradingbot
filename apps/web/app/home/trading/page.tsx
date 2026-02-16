@@ -8,7 +8,7 @@
  * @version 2.0.0 - Binance-only implementation
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@kit/ui/tabs';
 import { Badge } from '@kit/ui/badge';
@@ -116,6 +116,46 @@ export default function TradingDashboard() {
   const [newAlertCount, setNewAlertCount] = useState(0);
   const [currentPrices, setCurrentPrices] = useState<Record<string, number>>({});
   const [isExecutingOrder, setIsExecutingOrder] = useState(false);
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(280);
+  const isDraggingRef = useRef(false);
+  const startYRef = useRef(0);
+  const startHeightRef = useRef(0);
+
+  // ============================================================================
+  // RESIZABLE BOTTOM PANEL
+  // ============================================================================
+
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    startYRef.current = e.clientY;
+    startHeightRef.current = bottomPanelHeight;
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+
+    const handleDragMove = (ev: MouseEvent) => {
+      if (!isDraggingRef.current) return;
+      const delta = startYRef.current - ev.clientY;
+      const newHeight = Math.min(Math.max(startHeightRef.current + delta, 120), 600);
+      setBottomPanelHeight(newHeight);
+    };
+
+    const handleDragEnd = () => {
+      isDraggingRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', handleDragMove);
+      document.removeEventListener('mouseup', handleDragEnd);
+    };
+
+    document.addEventListener('mousemove', handleDragMove);
+    document.addEventListener('mouseup', handleDragEnd);
+  }, [bottomPanelHeight]);
+
+  // Trigger chart resize when bottom panel height changes
+  useEffect(() => {
+    window.dispatchEvent(new Event('resize'));
+  }, [bottomPanelHeight]);
 
   // ============================================================================
   // EXECUTE APPROVED ENTRY
@@ -286,36 +326,30 @@ export default function TradingDashboard() {
         </div>
       </div>
 
-      {/* Bottom Panel - Compact tabbed area */}
-      <div className="h-[180px] border-t bg-card/30 shrink-0">
-        <Tabs defaultValue="whales" className="h-full flex flex-col">
+      {/* Drag Handle - Resize bottom panel */}
+      <div
+        className="h-1.5 cursor-row-resize border-t hover:bg-primary/20 active:bg-primary/40 transition-colors shrink-0 relative group"
+        onMouseDown={handleDragStart}
+      >
+        <div className="absolute inset-x-0 top-0 h-3 -translate-y-1/2" />
+        <div className="mx-auto w-8 h-0.5 bg-muted-foreground/30 group-hover:bg-primary/50 rounded-full mt-px" />
+      </div>
+
+      {/* Bottom Panel - Resizable tabbed area */}
+      <div style={{ height: `${bottomPanelHeight}px` }} className="bg-card/30 shrink-0">
+        <Tabs defaultValue="positions" className="h-full flex flex-col">
           <div className="border-b shrink-0">
             <TabsList className="h-7 bg-transparent px-2">
-              <TabsTrigger value="whales" className="text-[11px] h-6 px-2 gap-1">
-                <Fish className="h-3 w-3" />
-                Whales
-              </TabsTrigger>
-              <TabsTrigger value="liqs" className="text-[11px] h-6 px-2 gap-1">
-                <Flame className="h-3 w-3" />
-                Liqs
-              </TabsTrigger>
-              <TabsTrigger value="positions" className="text-[11px] h-6 px-2 gap-1">
+              {/* Primary tabs */}
+              <TabsTrigger value="positions" className="text-[11px] h-6 px-2.5 gap-1">
                 <Wallet className="h-3 w-3" />
                 Positions
               </TabsTrigger>
-              <TabsTrigger value="strategies" className="text-[11px] h-6 px-2 gap-1">
-                <TrendingUp className="h-3 w-3" />
-                Strategies
+              <TabsTrigger value="atlas" className="text-[11px] h-6 px-2.5 gap-1">
+                <Brain className="h-3 w-3" />
+                Atlas
               </TabsTrigger>
-              <TabsTrigger value="wallets" className="text-[11px] h-6 px-2 gap-1">
-                <Activity className="h-3 w-3" />
-                Wallets
-              </TabsTrigger>
-              <TabsTrigger value="stats" className="text-[11px] h-6 px-2 gap-1">
-                <BarChart3 className="h-3 w-3" />
-                Stats
-              </TabsTrigger>
-              <TabsTrigger value="alerts" className="text-[11px] h-6 px-2 gap-1">
+              <TabsTrigger value="alerts" className="text-[11px] h-6 px-2.5 gap-1">
                 <BellRing className="h-3 w-3" />
                 Alerts
                 {newAlertCount > 0 && (
@@ -324,40 +358,35 @@ export default function TradingDashboard() {
                   </Badge>
                 )}
               </TabsTrigger>
-              <TabsTrigger value="atlas" className="text-[11px] h-6 px-2 gap-1">
-                <Brain className="h-3 w-3" />
-                Atlas
+              <TabsTrigger value="strategies" className="text-[11px] h-6 px-2.5 gap-1">
+                <TrendingUp className="h-3 w-3" />
+                Strategies
+              </TabsTrigger>
+              {/* Separator */}
+              <div className="w-px h-4 bg-border mx-1 self-center" />
+              {/* Secondary tabs */}
+              <TabsTrigger value="whales" className="text-[10px] h-6 px-1.5 gap-0.5">
+                <Fish className="h-3 w-3" />
+                Whales
+              </TabsTrigger>
+              <TabsTrigger value="liqs" className="text-[10px] h-6 px-1.5 gap-0.5">
+                <Flame className="h-3 w-3" />
+                Liqs
+              </TabsTrigger>
+              <TabsTrigger value="stats" className="text-[10px] h-6 px-1.5 gap-0.5">
+                <BarChart3 className="h-3 w-3" />
+                Stats
+              </TabsTrigger>
+              <TabsTrigger value="wallets" className="text-[10px] h-6 px-1.5 gap-0.5">
+                <Activity className="h-3 w-3" />
+                Wallets
               </TabsTrigger>
             </TabsList>
           </div>
 
           <div className="flex-1 overflow-hidden">
-            <TabsContent value="whales" className="h-full m-0">
-              <CompactWhaleTrades />
-            </TabsContent>
-
-            <TabsContent value="liqs" className="h-full m-0">
-              <CompactLiquidations />
-            </TabsContent>
-
             <TabsContent value="positions" className="h-full m-0 p-1.5">
-              <OpenPositions />
-            </TabsContent>
-
-            <TabsContent value="strategies" className="h-full m-0 p-1.5">
-              <ActiveStrategies />
-            </TabsContent>
-
-            <TabsContent value="wallets" className="h-full m-0 p-1.5">
-              <WalletTracker />
-            </TabsContent>
-
-            <TabsContent value="stats" className="h-full m-0 p-1.5">
-              <MarketStats symbol={selectedSymbol} />
-            </TabsContent>
-
-            <TabsContent value="alerts" className="h-full m-0">
-              <AlertsFeed />
+              <OpenPositions currentPrices={currentPrices} />
             </TabsContent>
 
             {/* Atlas panel MUST stay mounted for timers to work - forceMount keeps hooks running */}
@@ -374,6 +403,30 @@ export default function TradingDashboard() {
                   toast.info(`Action proposed: ${actionType} for ${tradeId.slice(0, 8)}...`);
                 }}
               />
+            </TabsContent>
+
+            <TabsContent value="alerts" className="h-full m-0">
+              <AlertsFeed />
+            </TabsContent>
+
+            <TabsContent value="strategies" className="h-full m-0 p-1.5">
+              <ActiveStrategies />
+            </TabsContent>
+
+            <TabsContent value="whales" className="h-full m-0">
+              <CompactWhaleTrades />
+            </TabsContent>
+
+            <TabsContent value="liqs" className="h-full m-0">
+              <CompactLiquidations />
+            </TabsContent>
+
+            <TabsContent value="stats" className="h-full m-0 p-1.5">
+              <MarketStats symbol={selectedSymbol} />
+            </TabsContent>
+
+            <TabsContent value="wallets" className="h-full m-0 p-1.5">
+              <WalletTracker />
             </TabsContent>
           </div>
         </Tabs>

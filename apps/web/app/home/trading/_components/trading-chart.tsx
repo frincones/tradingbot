@@ -405,7 +405,7 @@ export function TradingChart({ onSymbolChange }: Props) {
     });
 
   return (
-    <Card className="col-span-full border-0 bg-card/50">
+    <Card className="col-span-full border-0 bg-card/50 h-full flex flex-col">
       <CardHeader className="pb-2 px-4">
         <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
           <div className="flex items-center gap-4 flex-wrap">
@@ -524,8 +524,8 @@ export function TradingChart({ onSymbolChange }: Props) {
         )}
       </CardHeader>
 
-      <CardContent className="p-0">
-        <div className="relative h-[600px] w-full">
+      <CardContent className="p-0 flex-1 min-h-0">
+        <div className="relative h-full w-full">
           {loading && !candleSeriesRef.current?.data && (
             <div className="absolute inset-0 flex items-center justify-center bg-background/50 z-10">
               <div className="flex flex-col items-center gap-2">
