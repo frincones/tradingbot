@@ -480,14 +480,18 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
       }
       const atlasResponse = result.response as AtlasEntryResponse;
 
-      console.log('[Atlas Entry] Analysis complete:', {
-        globalStatus: atlasResponse.global_governor.status,
-        approved: atlasResponse.entry_gatekeeping.filter(e => e.decision === 'APPROVE_ENTRY').length,
-        blocked: atlasResponse.entry_gatekeeping.filter(e => e.decision === 'BLOCK').length,
-      });
-
       const approved = atlasResponse.entry_gatekeeping.filter(e => e.decision === 'APPROVE_ENTRY');
       const blocked = atlasResponse.entry_gatekeeping.filter(e => e.decision === 'BLOCK');
+      const waited = atlasResponse.entry_gatekeeping.filter(e => e.decision === 'WAIT');
+
+      console.log('[Atlas Entry] Analysis complete:', {
+        globalStatus: atlasResponse.global_governor.status,
+        approved: approved.length,
+        blocked: blocked.length,
+        waited: waited.length,
+        total: atlasResponse.entry_gatekeeping.length,
+        decisions: atlasResponse.entry_gatekeeping.map(e => `${e.candidate_id?.slice(0, 8)}: ${e.decision}`),
+      });
 
       setState((s) => ({
         ...s,
@@ -507,23 +511,28 @@ export function useAtlasEntryGatekeeping(options: UseAtlasEntryGatekeepingOption
         onEntryApproved?.(entry.candidate_id, atlasResponse);
       }
 
-      // Mark BLOCK'd alerts as dismissed to prevent re-analysis loops
-      if (blocked.length > 0) {
-        const supabase = getSupabaseBrowserClient();
-        const blockedIds = blocked.map(e => e.candidate_id);
-        const { error: dismissError } = await supabase
-          .from('agent_alerts')
-          .update({
-            status: 'dismissed' as const,
-            action_taken: 'blocked_by_atlas',
-          })
-          .in('id', blockedIds);
+      // Mark BLOCK'd and WAIT'd alerts as dismissed to prevent infinite re-analysis loops
+      const toDismiss = [
+        ...blocked.map(e => ({ id: e.candidate_id, reason: 'blocked_by_atlas' })),
+        ...waited.map(e => ({ id: e.candidate_id, reason: 'wait_by_atlas' })),
+      ];
 
-        if (dismissError) {
-          console.warn('[Atlas Entry] Failed to dismiss blocked alerts:', dismissError);
-        } else {
-          console.log('[Atlas Entry] Dismissed', blockedIds.length, 'blocked alerts');
+      if (toDismiss.length > 0) {
+        const supabase = getSupabaseBrowserClient();
+        for (const item of toDismiss) {
+          const { error: dismissError } = await supabase
+            .from('agent_alerts')
+            .update({
+              status: 'dismissed' as const,
+              action_taken: item.reason,
+            })
+            .eq('id', item.id);
+
+          if (dismissError) {
+            console.warn('[Atlas Entry] Failed to dismiss alert:', item.id, dismissError);
+          }
         }
+        console.log('[Atlas Entry] Dismissed', toDismiss.length, 'alerts (blocked + wait)');
       }
     } catch (error) {
       clearTimeout(timeoutId);
