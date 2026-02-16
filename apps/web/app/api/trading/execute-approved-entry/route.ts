@@ -253,29 +253,96 @@ export async function POST(request: NextRequest) {
     console.log('[Execute Entry] Order saved to database:', savedOrder.id);
 
     // ============================================================================
-    // 5b. CREATE POSITION RECORD
+    // 5b. CREATE OR UPDATE POSITION RECORD
     // ============================================================================
 
-    const { error: positionError } = await adminClient
-      .from('positions')
-      .insert({
-        user_id: user.id,
-        strategy_id: strategyId,
-        symbol: `${symbol}USDT`,
-        side: side.toLowerCase() as 'buy' | 'sell',
-        qty: filledQty || sizeUsd,
-        avg_entry_price: filledPrice > 0 ? filledPrice : null,
-        entry_order_id: savedOrder.id,
-        entry_at: new Date().toISOString(),
-        is_open: true,
-        stop_loss_price: stopLoss > 0 ? stopLoss : null,
-        take_profit_price: takeProfit > 0 ? takeProfit : null,
-      });
+    const newQty = filledQty || sizeUsd;
+    const newPrice = filledPrice > 0 ? filledPrice : 0;
+    const positionSymbol = `${symbol}USDT`;
 
-    if (positionError) {
-      console.warn('[Execute Entry] Failed to create position:', positionError);
+    // Check if position already exists for this strategy + symbol (UNIQUE constraint)
+    const { data: existingPosition } = await adminClient
+      .from('positions')
+      .select('id, qty, avg_entry_price, is_open, side')
+      .eq('strategy_id', strategyId)
+      .eq('symbol', positionSymbol)
+      .single();
+
+    if (existingPosition && existingPosition.is_open) {
+      // Accumulate: weighted average entry price
+      const oldQty = Number(existingPosition.qty) || 0;
+      const oldPrice = Number(existingPosition.avg_entry_price) || 0;
+      const totalQty = oldQty + newQty;
+      const weightedAvgPrice = totalQty > 0 && newPrice > 0
+        ? (oldPrice * oldQty + newPrice * newQty) / totalQty
+        : oldPrice;
+
+      const { error: updateError } = await adminClient
+        .from('positions')
+        .update({
+          qty: totalQty,
+          avg_entry_price: weightedAvgPrice,
+          entry_order_id: savedOrder.id,
+          stop_loss_price: stopLoss > 0 ? stopLoss : null,
+          take_profit_price: takeProfit > 0 ? takeProfit : null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', existingPosition.id);
+
+      if (updateError) {
+        console.warn('[Execute Entry] Failed to update position:', updateError);
+      } else {
+        console.log('[Execute Entry] Position accumulated:', { oldQty, newQty, totalQty, weightedAvgPrice: weightedAvgPrice.toFixed(2) });
+      }
+    } else if (existingPosition && !existingPosition.is_open) {
+      // Reopen closed position with new values
+      const { error: reopenError } = await adminClient
+        .from('positions')
+        .update({
+          qty: newQty,
+          avg_entry_price: newPrice > 0 ? newPrice : null,
+          side: side.toLowerCase() as 'buy' | 'sell',
+          entry_order_id: savedOrder.id,
+          entry_at: new Date().toISOString(),
+          is_open: true,
+          closed_at: null,
+          close_reason: null,
+          unrealized_pnl: null,
+          realized_pnl: null,
+          stop_loss_price: stopLoss > 0 ? stopLoss : null,
+          take_profit_price: takeProfit > 0 ? takeProfit : null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', existingPosition.id);
+
+      if (reopenError) {
+        console.warn('[Execute Entry] Failed to reopen position:', reopenError);
+      } else {
+        console.log('[Execute Entry] Position reopened');
+      }
     } else {
-      console.log('[Execute Entry] Position record created');
+      // No existing position — insert new
+      const { error: positionError } = await adminClient
+        .from('positions')
+        .insert({
+          user_id: user.id,
+          strategy_id: strategyId,
+          symbol: positionSymbol,
+          side: side.toLowerCase() as 'buy' | 'sell',
+          qty: newQty,
+          avg_entry_price: newPrice > 0 ? newPrice : null,
+          entry_order_id: savedOrder.id,
+          entry_at: new Date().toISOString(),
+          is_open: true,
+          stop_loss_price: stopLoss > 0 ? stopLoss : null,
+          take_profit_price: takeProfit > 0 ? takeProfit : null,
+        });
+
+      if (positionError) {
+        console.warn('[Execute Entry] Failed to create position:', positionError);
+      } else {
+        console.log('[Execute Entry] Position record created');
+      }
     }
 
     // ============================================================================
