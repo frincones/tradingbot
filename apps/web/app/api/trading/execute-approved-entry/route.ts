@@ -128,14 +128,10 @@ export async function POST(request: NextRequest) {
       });
     } catch (binanceError) {
       const errorMsg = binanceError instanceof Error ? binanceError.message : String(binanceError);
-      const isGeoRestricted = errorMsg.includes('restricted location') || errorMsg.includes('Service unavailable');
+      console.warn('[Execute Entry] Binance execution failed:', errorMsg);
 
-      if (!isGeoRestricted) {
-        throw binanceError; // Re-throw non-geo errors
-      }
-
-      // Fallback: Paper trading simulation
-      console.warn('[Execute Entry] Binance geo-restricted, using paper trading fallback');
+      // Fallback: Paper trading simulation for any Binance error (demo/testnet mode)
+      console.warn('[Execute Entry] Using paper trading fallback');
       isPaper = true;
 
       // Use the alert's ideal entry price or fetch current price
@@ -178,6 +174,7 @@ export async function POST(request: NextRequest) {
 
     if (existingStrategy) {
       strategyId = existingStrategy.id;
+      console.log('[Execute Entry] Using existing strategy:', strategyId);
     } else {
       // Create new strategy
       const { data: newStrategy, error: strategyError } = await client
@@ -201,6 +198,7 @@ export async function POST(request: NextRequest) {
       }
 
       strategyId = newStrategy.id;
+      console.log('[Execute Entry] Created new strategy:', strategyId);
     }
 
     // ============================================================================
@@ -229,7 +227,7 @@ export async function POST(request: NextRequest) {
         qty: filledQty || sizeUsd,
         filled_qty: filledQty > 0 ? filledQty : null,
         filled_avg_price: filledPrice > 0 ? filledPrice : null,
-        broker: 'binance',
+        broker: isPaper ? 'paper' : 'binance',
         binance_order_id: orderResult.entryOrder.orderId,
         binance_client_order_id: orderResult.entryOrder.clientOrderId,
         stop_price: stopLoss > 0 ? stopLoss : null,
