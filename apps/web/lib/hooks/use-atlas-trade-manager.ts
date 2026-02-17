@@ -97,25 +97,25 @@ export function useAtlasTradeManager(options: UseAtlasTradeManagerOptions) {
   const fetchOpenTrades = useCallback(async (): Promise<AtlasOpenTrade[]> => {
     const supabase = getSupabaseBrowserClient();
 
-    // Fetch real Binance orders instead of paper orders
-    const { data: orders, error } = await supabase
-      .from('orders')
+    // Query positions table for open positions (works for both paper and Binance)
+    const { data: positions, error } = await supabase
+      .from('positions')
       .select('*')
-      .eq('symbol', `${symbol}USDT`) // Binance uses BTCUSDT format
-      .in('status', ['pending', 'submitted', 'accepted', 'partially_filled']) // Open statuses
+      .eq('symbol', `${symbol}USDT`)
+      .eq('is_open', true)
       .order('created_at', { ascending: false });
 
     if (error) {
-      console.error('[Atlas Trades] Error fetching open trades:', error);
+      console.error('[Atlas Trades] Error fetching open positions:', error);
       return [];
     }
 
-    if (!orders || orders.length === 0) {
-      console.log('[Atlas Trades] No open Binance trades found');
+    if (!positions || positions.length === 0) {
+      console.log('[Atlas Trades] No open positions found');
       return [];
     }
 
-    console.log('[Atlas Trades] Found', orders.length, 'open Binance trades');
+    console.log('[Atlas Trades] Found', positions.length, 'open positions');
 
     // Fetch current price for PnL calculation
     let currentPrice = 0;
@@ -132,61 +132,51 @@ export function useAtlasTradeManager(options: UseAtlasTradeManagerOptions) {
       console.error('[Atlas Trades] Failed to fetch current price');
     }
 
-    // Convert Binance orders to AtlasOpenTrade format
-    return orders.map((order) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const orderAny = order as any;
-
-      // For Binance orders, we use filled_avg_price as entry (or limit_price if not filled yet)
-      const entryPrice = Number(order.filled_avg_price) || Number(order.limit_price) || currentPrice;
-
-      // Calculate size in USD from qty and price
-      const qty = Number(order.qty) || 0;
+    // Convert positions to AtlasOpenTrade format
+    return positions.map((position) => {
+      const entryPrice = Number(position.avg_entry_price) || currentPrice;
+      const qty = Number(position.qty) || 0;
       const sizeUsd = qty * entryPrice;
 
-      // Binance orders don't have SL/TP embedded (they're separate orders)
-      // For now, use default values - TODO: link to actual SL/TP orders
-      const stopLoss = Number(order.stop_price) || 0;
-      const takeProfit = 0; // Would need to fetch from separate order
-      const originalSL = stopLoss;
-      const originalTP = takeProfit;
+      const stopLoss = Number(position.stop_loss_price) || 0;
+      const takeProfit = Number(position.take_profit_price) || 0;
 
-      // Determine side from order side enum
-      const side = (order.side as string).toUpperCase() === 'BUY' ? 'LONG' as const : 'SHORT' as const;
+      // Determine side from position side
+      const side = (position.side as string)?.toUpperCase() === 'BUY' ? 'LONG' as const : 'SHORT' as const;
 
       // Calculate PnL
       const priceDiff = side === 'LONG'
         ? currentPrice - entryPrice
         : entryPrice - currentPrice;
-      const unrealizedPnlUsd = (priceDiff / entryPrice) * sizeUsd;
-      const unrealizedPnlPct = (priceDiff / entryPrice) * 100;
+      const unrealizedPnlUsd = priceDiff * qty;
+      const unrealizedPnlPct = entryPrice > 0 ? (priceDiff / entryPrice) * 100 : 0;
 
       // Calculate age in seconds
-      const entryTime = new Date(order.filled_at || order.created_at);
+      const entryTime = new Date(position.entry_at || position.created_at);
       const ageSec = Math.floor((Date.now() - entryTime.getTime()) / 1000);
 
       return {
-        trade_id: order.id,
-        alert_id: order.intent_id, // Link to trade intent
-        symbol: order.symbol.replace('USDT', ''), // Convert BTCUSDT -> BTC
+        trade_id: position.id,
+        alert_id: position.entry_intent_id,
+        symbol: position.symbol.replace('USDT', ''),
         side,
         entry_price: entryPrice,
-        entry_time: (order.filled_at || order.created_at) as string,
+        entry_time: (position.entry_at || position.created_at) as string,
         size_usd: sizeUsd,
         current_price: currentPrice,
         unrealized_pnl_usd: unrealizedPnlUsd,
         unrealized_pnl_pct: unrealizedPnlPct,
-        mfe_usd: Math.max(0, unrealizedPnlUsd), // TODO: Track actual MFE
-        mae_usd: Math.min(0, unrealizedPnlUsd), // TODO: Track actual MAE
+        mfe_usd: Math.max(0, unrealizedPnlUsd),
+        mae_usd: Math.min(0, unrealizedPnlUsd),
         age_sec: ageSec,
-        last_review_ts: null, // TODO: Add review tracking
-        review_count: 0, // TODO: Add review tracking
+        last_review_ts: null,
+        review_count: 0,
         risk_plan: {
-          original_stop_loss: originalSL,
-          original_take_profit: originalTP,
+          original_stop_loss: stopLoss,
+          original_take_profit: takeProfit,
           current_stop_loss: stopLoss,
           current_take_profit: takeProfit,
-          time_stop_sec: 3600, // 1 hour default
+          time_stop_sec: 3600,
           invalidation_level: stopLoss,
           r_multiple_target: 2,
         },
